@@ -158,7 +158,7 @@ function withStep(
 function assertCheckpoint(
   checkpoint: SquidExecutionCheckpoint,
   expectedId: string,
-  requirementIds: Set<string>,
+  requirementAmounts: ReadonlyMap<string, bigint>,
   feeMode: "standard" | "op-stack",
 ) {
   if (
@@ -213,10 +213,11 @@ function assertCheckpoint(
       typeof item.transactionHash === "string"
         ? item.transactionHash.toLowerCase()
         : undefined
+    const requirementAmount = requirementAmounts.get(item.requirementId)
     if (
       seen.has(itemKey) ||
       (transactionHash != null && transactionHashes.has(transactionHash)) ||
-      !requirementIds.has(item.requirementId) ||
+      requirementAmount == null ||
       typeof item.nativeFee !== "bigint" ||
       item.nativeFee < 0n ||
       typeof item.from !== "string" ||
@@ -247,7 +248,7 @@ function assertCheckpoint(
       (item.receiptStatus != null && item.transactionHash == null) ||
       (item.kind === "route" &&
         (typeof item.destinationMinimum !== "bigint" ||
-          item.destinationMinimum < 0n ||
+          item.destinationMinimum < requirementAmount ||
           typeof item.quoteId !== "string" ||
           item.quoteId === "" ||
           (item.requestId != null &&
@@ -268,7 +269,7 @@ function assertCheckpoint(
       attempts.set(item.requirementId, values)
     }
   }
-  for (const requirementId of requirementIds) {
+  for (const requirementId of requirementAmounts.keys()) {
     const approvals = approvalAttempts.get(requirementId) ?? new Set<number>()
     const resets = resetAttempts.get(requirementId) ?? new Set<number>()
     const combined = new Set([...approvals, ...resets])
@@ -475,8 +476,12 @@ export async function executeSquidFunding(
     input.pollIntervalMs > MAX_POLL_INTERVAL_MS
   )
     throw new Error("Execution limits and at least one quote are required")
-  const ids = new Set(input.quotes.map((quote) => quote.requirement.id))
-  if (ids.size !== input.quotes.length)
+  const requirementAmounts = new Map(
+    input.quotes.map(
+      (quote) => [quote.requirement.id, quote.requirement.amount] as const,
+    ),
+  )
+  if (requirementAmounts.size !== input.quotes.length)
     throw new Error("Execution requirement IDs must be unique")
   const configuredStatus: unknown = dependencies.status
   const configuredStatusOptions: unknown = dependencies.squidStatusOptions
@@ -536,7 +541,7 @@ export async function executeSquidFunding(
     throw new Error("Execution would exceed the source-token cap")
   const id = executionId(input)
   let checkpoint = (await dependencies.load()) ?? { executionId: id, steps: [] }
-  assertCheckpoint(checkpoint, id, ids, input.feeMode)
+  assertCheckpoint(checkpoint, id, requirementAmounts, input.feeMode)
   if (checkpoint.steps.some((item) => item.transactionHash == null))
     throw new Error(
       "Checkpoint intent has no transaction hash; reconcile manually before resuming",
@@ -595,10 +600,18 @@ export async function executeSquidFunding(
     if (known?.receiptStatus === "success") return known
     if (known != null)
       throw new Error("Checkpoint transaction is not reconciled")
-    const pendingNonce = await dependencies.publicClient.getTransactionCount({
-      address: input.account,
-      blockTag: "pending",
-    })
+    const [latestNonce, pendingNonce] = await Promise.all([
+      dependencies.publicClient.getTransactionCount({
+        address: input.account,
+        blockTag: "latest",
+      }),
+      dependencies.publicClient.getTransactionCount({
+        address: input.account,
+        blockTag: "pending",
+      }),
+    ])
+    if (latestNonce !== pendingNonce)
+      throw new Error("Source account has pending transactions")
     const prepared = await prepare(
       dependencies.publicClient,
       { ...transaction, nonce: pendingNonce },

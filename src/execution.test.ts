@@ -632,6 +632,25 @@ describe("bounded Squid execution", () => {
     )
   })
 
+  it("rejects pre-existing pending transactions before preparing a send", async () => {
+    const mocked = clients({ allowance: 10n })
+    let balanceReads = 0
+    mocked.source.getTransactionCount = async ({ blockTag }) =>
+      blockTag === "latest" ? 7 : 8
+    mocked.source.getBalance = async () => {
+      balanceReads += 1
+      return 1_000n
+    }
+    const deps = dependencies(mocked)
+    await expect(executeSquidFunding(input(), deps)).rejects.toThrow(
+      "account has pending transactions",
+    )
+    expect(mocked.calls.estimateGas).toBe(0)
+    expect(balanceReads).toBe(0)
+    expect(deps.saved()).toEqual([])
+    expect(mocked.calls.send).toBe(0)
+  })
+
   it("checks the wallet chain after the final pending-nonce read", async () => {
     const mocked = clients({
       allowance: 10n,
@@ -640,7 +659,7 @@ describe("bounded Squid execution", () => {
     let nonceReads = 0
     mocked.source.getTransactionCount = async () => {
       nonceReads += 1
-      if (nonceReads === 2) {
+      if (nonceReads === 3) {
         await Promise.resolve()
         mocked.setWalletChainId(10)
       }
@@ -650,7 +669,7 @@ describe("bounded Squid execution", () => {
     await expect(executeSquidFunding(input(), deps)).rejects.toThrow(
       "Wallet chain",
     )
-    expect(nonceReads).toBe(2)
+    expect(nonceReads).toBe(3)
     expect(mocked.calls.send).toBe(0)
     expect(deps.saved().at(-1)?.steps).toEqual([])
   })
@@ -1156,6 +1175,26 @@ describe("bounded Squid execution", () => {
     await expect(
       executeSquidFunding(input(), dependencies(mocked, noncontiguousAttempt)),
     ).rejects.toThrow("invalid execution steps")
+  })
+
+  it("rejects checkpoint route minimums below the bound requirement", async () => {
+    const mocked = clients({ allowance: 10n })
+    const checkpoint = await executeSquidFunding(input(), dependencies(mocked))
+    const sends = mocked.calls.send
+    const statusCalls = mocked.calls.status
+    for (const destinationMinimum of [0n, 9n]) {
+      const invalid = {
+        ...checkpoint,
+        steps: checkpoint.steps.map((step) =>
+          step.kind === "route" ? { ...step, destinationMinimum } : step,
+        ),
+      }
+      await expect(
+        executeSquidFunding(input(), dependencies(mocked, invalid)),
+      ).rejects.toThrow("invalid execution steps")
+    }
+    expect(mocked.calls.status).toBe(statusCalls)
+    expect(mocked.calls.send).toBe(sends)
   })
 
   it("binds requirement amounts and fee mode to the checkpoint identity", async () => {
