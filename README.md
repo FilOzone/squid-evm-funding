@@ -17,7 +17,13 @@ const quotes = await planSquidFunding(
 
 `planSquidFunding` returns fixed-input quotes for exact destination amounts. It
 shares `maxSourceAmount` across all requirements and re-quotes a successful
-seed down to the proportional input. It does not choose source chains or
-tokens, execute a route, persist recovery state, or access environment variables.
+seed down to the proportional input.
+
+`executeSquidFunding` is the opt-in execution step. The caller supplies viem
+public/wallet clients, account, route refresh/status functions, destination
+clients, and non-sensitive checkpoint load/save callbacks. It uses only the
+caller-approved route target and spender, persists intent before sending, and
+does not retry an intent that has no transaction hash. It never accepts a
+private key, selects a source, or accesses environment variables.
 
 Implementation is tracked in [issue #1](https://github.com/snissn/squid-evm-funding/issues/1).

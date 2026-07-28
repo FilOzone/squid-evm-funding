@@ -3,6 +3,7 @@ import {
   fetchSquidCatalog,
   parseSquidCatalog,
   planSquidFunding,
+  quoteSquidRoute,
   resolveSourceToken,
 } from "./index.js"
 
@@ -24,7 +25,10 @@ const tokens = [
   { chainId: "osmosis-1", address: "uosmo", symbol: "OSMO", decimals: 6 },
 ]
 
-function routeFetch(output: (input: bigint) => bigint) {
+function routeFetch(
+  output: (input: bigint) => bigint,
+  approvalSpender?: string,
+) {
   let calls = 0
   const fetch = async (_url: string | URL | Request, init?: RequestInit) => {
     calls += 1
@@ -56,6 +60,7 @@ function routeFetch(output: (input: bigint) => bigint) {
             gasLimit: "1",
             maxFeePerGas: "1",
             expiry: "2000000000",
+            ...(approvalSpender == null ? {} : { approvalSpender }),
           },
         },
       }),
@@ -158,6 +163,121 @@ describe("Squid catalog and planner", () => {
     await expect(
       fetchSquidCatalog({ integratorId: " ", fetch }),
     ).rejects.toThrow("integrator ID")
+  })
+
+  it("keeps an explicit provider approval spender for execution validation", async () => {
+    const source = resolveSourceToken(
+      parseSquidCatalog(chains, tokens),
+      1,
+      "USDC",
+    )
+    const result = await quoteSquidRoute(
+      {
+        owner,
+        source,
+        requirement: {
+          id: "fund",
+          chainId: 314,
+          token: destination,
+          amount: 1n,
+          recipient: owner,
+        },
+        sourceAmount: 1n,
+        slippage: 1,
+      },
+      {
+        integratorId: "test",
+        fetch: routeFetch((amount) => amount, target).fetch,
+        now: () => 0,
+      },
+    )
+    expect(result.approvalSpender).toBe(target)
+  })
+
+  it("accepts legacy gasPrice routes with a usable compatible fee", async () => {
+    const source = resolveSourceToken(
+      parseSquidCatalog(chains, tokens),
+      1,
+      "USDC",
+    )
+    const original = routeFetch((amount) => amount).fetch
+    const fetch = (async (url, init) => {
+      const response = await original(url, init)
+      const body = (await response.json()) as {
+        route: { transactionRequest: Record<string, string> }
+      }
+      delete body.route.transactionRequest.maxFeePerGas
+      body.route.transactionRequest.gasPrice = "7"
+      return new Response(JSON.stringify(body))
+    }) as typeof globalThis.fetch
+    const result = await quoteSquidRoute(
+      {
+        owner,
+        source,
+        requirement: {
+          id: "fund",
+          chainId: 314,
+          token: destination,
+          amount: 1n,
+          recipient: owner,
+        },
+        sourceAmount: 1n,
+        slippage: 1,
+      },
+      { integratorId: "test", fetch, now: () => 0 },
+    )
+    expect(result.maxFeePerGas).toBe(7n)
+    expect(result.gasPrice).toBe(7n)
+  })
+
+  it("rejects a multi-leg plan when an early route expires before return", async () => {
+    const source = resolveSourceToken(
+      parseSquidCatalog(chains, tokens),
+      1,
+      "USDC",
+    )
+    const original = routeFetch((amount) => amount).fetch
+    const fetch = (async (url, init) => {
+      const response = await original(url, init)
+      const body = (await response.json()) as {
+        route: { transactionRequest: { expiry: string } }
+      }
+      body.route.transactionRequest.expiry = "50"
+      return new Response(JSON.stringify(body))
+    }) as typeof globalThis.fetch
+    let clock = 0
+    await expect(
+      planSquidFunding(
+        {
+          owner,
+          source,
+          requirements: [
+            {
+              id: "one",
+              chainId: 314,
+              token: destination,
+              amount: 1n,
+              recipient: owner,
+            },
+            {
+              id: "two",
+              chainId: 314,
+              token: destination,
+              amount: 1n,
+              recipient: owner,
+            },
+          ],
+          maxSourceAmount: 2n,
+          initialSourceAmount: 1n,
+          slippage: 1,
+        },
+        {
+          integratorId: "test",
+          fetch,
+          now: () => (clock++ < 2 ? 0 : 51_000),
+        },
+      ),
+    ).rejects.toThrow("expired before planning completed")
   })
 
   it("rejects malformed catalog wrappers", async () => {

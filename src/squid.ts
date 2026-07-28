@@ -20,8 +20,10 @@ type RouteWire = {
       value?: string
       gasLimit?: string
       maxFeePerGas?: string
+      gasPrice?: string
       expiry?: string
       requestId?: string
+      approvalSpender?: string
     }
   }
 }
@@ -213,6 +215,10 @@ export async function quoteSquidRoute(
     !/^0x(?:[0-9a-fA-F]{2})+$/.test(transaction.data)
   )
     throw new Error("Invalid Squid route: calldata")
+  const approvalSpender =
+    transaction.approvalSpender == null
+      ? undefined
+      : address(transaction.approvalSpender, "approval spender")
   const estimatedRouteDuration = route.estimate?.estimatedRouteDuration
   return {
     id: route.quoteId,
@@ -230,10 +236,17 @@ export async function quoteSquidRoute(
       "minimum destination amount",
     ),
     target: address(transaction.target, "target"),
+    ...(approvalSpender == null ? {} : { approvalSpender }),
     data: transaction.data as Hex,
     value: amount(transaction.value ?? "0", "value"),
     gasLimit: amount(transaction.gasLimit, "gas limit"),
-    maxFeePerGas: amount(transaction.maxFeePerGas, "max fee per gas"),
+    maxFeePerGas: amount(
+      transaction.maxFeePerGas ?? transaction.gasPrice,
+      "max fee per gas or legacy gas price",
+    ),
+    ...(transaction.gasPrice == null
+      ? {}
+      : { gasPrice: amount(transaction.gasPrice, "legacy gas price") }),
     expiresAt,
     estimatedRouteDurationSeconds:
       typeof estimatedRouteDuration === "number" &&
