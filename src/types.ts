@@ -60,7 +60,15 @@ export interface SquidExecutionStep {
   kind: "approval" | "approval-reset" | "route"
   requirementId: string
   nativeFee: bigint
+  from: Address
+  to: Address
+  dataHash: Hash
+  value: bigint
   nonce: number
+  gas: bigint
+  maxFeePerGas?: bigint
+  maxPriorityFeePerGas?: bigint
+  gasPrice?: bigint
   destinationMinimum?: bigint
   quoteId?: string
   requestId?: string
@@ -89,6 +97,7 @@ export type SquidPublicClient = Pick<
   | "estimateGas"
   | "getBalance"
   | "getChainId"
+  | "getTransaction"
   | "getTransactionCount"
   | "readContract"
   | "waitForTransactionReceipt"
@@ -99,6 +108,10 @@ export type SquidPublicClient = Pick<
     data: Hex
     value: bigint
     nonce: number
+    gas: bigint
+    maxFeePerGas?: bigint
+    maxPriorityFeePerGas?: bigint
+    gasPrice?: bigint
   }) => Promise<bigint>
 }
 

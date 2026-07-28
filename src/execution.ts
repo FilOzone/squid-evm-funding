@@ -4,6 +4,7 @@ import {
   erc20Abi,
   type Hash,
   type Hex,
+  keccak256,
 } from "viem"
 import { fetchSquidStatus } from "./squid.js"
 import type {
@@ -24,8 +25,38 @@ type Transaction = {
   nonce: number
   gas?: bigint
   maxFeePerGas?: bigint
+  maxPriorityFeePerGas?: bigint
   gasPrice?: bigint
 }
+
+const COMMON_STEP_KEYS = [
+  "kind",
+  "requirementId",
+  "nativeFee",
+  "from",
+  "to",
+  "dataHash",
+  "value",
+  "nonce",
+  "gas",
+  "maxFeePerGas",
+  "maxPriorityFeePerGas",
+  "gasPrice",
+  "transactionHash",
+  "receiptStatus",
+] as const
+
+const ROUTE_STEP_KEYS = new Set<string>([
+  ...COMMON_STEP_KEYS,
+  "destinationMinimum",
+  "quoteId",
+  "requestId",
+  "fromChainId",
+  "toChainId",
+])
+
+const APPROVAL_STEP_KEYS = new Set<string>(COMMON_STEP_KEYS)
+const MAX_POLL_INTERVAL_MS = 2_147_483_647
 
 function sameAddress(a: Address, b: Address) {
   return a.toLowerCase() === b.toLowerCase()
@@ -33,6 +64,10 @@ function sameAddress(a: Address, b: Address) {
 
 function native(token: Address) {
   return sameAddress(token, NATIVE_TOKEN_ADDRESS)
+}
+
+function sleep(milliseconds: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds))
 }
 
 function key(kind: SquidExecutionStep["kind"], requirementId: string) {
@@ -45,6 +80,7 @@ function executionId(input: {
   quotes: readonly SquidQuote[]
   trustedTarget: Address
   trustedSpender: Address
+  feeMode: "standard" | "op-stack"
 }) {
   return JSON.stringify({
     account: input.account.toLowerCase(),
@@ -55,6 +91,7 @@ function executionId(input: {
     ],
     target: input.trustedTarget.toLowerCase(),
     spender: input.trustedSpender.toLowerCase(),
+    feeMode: input.feeMode,
     quotes: input.quotes.map((quote) => [
       quote.requirement.id,
       quote.sourceAmount.toString(),
@@ -97,21 +134,81 @@ function assertCheckpoint(
   checkpoint: SquidExecutionCheckpoint,
   expectedId: string,
   requirementIds: Set<string>,
+  feeMode: "standard" | "op-stack",
 ) {
-  if (checkpoint.executionId !== expectedId)
+  if (
+    checkpoint == null ||
+    typeof checkpoint !== "object" ||
+    !Array.isArray(checkpoint.steps) ||
+    Object.keys(checkpoint).some(
+      (checkpointKey) =>
+        checkpointKey !== "executionId" && checkpointKey !== "steps",
+    ) ||
+    checkpoint.executionId !== expectedId
+  )
     throw new Error("Checkpoint does not match this execution")
   const seen = new Set<string>()
+  const transactionHashes = new Set<string>()
   for (const item of checkpoint.steps) {
+    if (item == null || typeof item !== "object")
+      throw new Error("Checkpoint has invalid execution steps")
+    if (
+      item.kind !== "approval" &&
+      item.kind !== "approval-reset" &&
+      item.kind !== "route"
+    )
+      throw new Error("Checkpoint has invalid execution steps")
+    if (typeof item.requirementId !== "string")
+      throw new Error("Checkpoint has invalid execution steps")
+    const allowedKeys =
+      item.kind === "route" ? ROUTE_STEP_KEYS : APPROVAL_STEP_KEYS
+    if (Object.keys(item).some((itemKey) => !allowedKeys.has(itemKey)))
+      throw new Error("Checkpoint has invalid execution steps")
     const itemKey = key(item.kind, item.requirementId)
+    const eip1559Fees =
+      typeof item.maxFeePerGas === "bigint" &&
+      item.maxFeePerGas > 0n &&
+      typeof item.maxPriorityFeePerGas === "bigint" &&
+      item.maxPriorityFeePerGas >= 0n &&
+      item.maxPriorityFeePerGas <= item.maxFeePerGas &&
+      item.gasPrice == null
+    const legacyFees =
+      typeof item.gasPrice === "bigint" &&
+      item.gasPrice > 0n &&
+      item.maxFeePerGas == null &&
+      item.maxPriorityFeePerGas == null
+    const transactionHash =
+      typeof item.transactionHash === "string"
+        ? item.transactionHash.toLowerCase()
+        : undefined
     if (
       seen.has(itemKey) ||
+      (transactionHash != null && transactionHashes.has(transactionHash)) ||
       !requirementIds.has(item.requirementId) ||
       typeof item.nativeFee !== "bigint" ||
       item.nativeFee < 0n ||
-      !["approval", "approval-reset", "route"].includes(item.kind) ||
+      typeof item.from !== "string" ||
+      !/^0x[0-9a-fA-F]{40}$/.test(item.from) ||
+      typeof item.to !== "string" ||
+      !/^0x[0-9a-fA-F]{40}$/.test(item.to) ||
+      typeof item.dataHash !== "string" ||
+      !/^0x[0-9a-fA-F]{64}$/.test(item.dataHash) ||
+      typeof item.value !== "bigint" ||
+      item.value < 0n ||
       !Number.isSafeInteger(item.nonce) ||
+      item.nonce < 0 ||
+      typeof item.gas !== "bigint" ||
+      item.gas <= 0n ||
+      (!eip1559Fees && !legacyFees) ||
+      (feeMode === "standard" &&
+        item.nativeFee !==
+          item.gas *
+            (eip1559Fees
+              ? (item.maxFeePerGas as bigint)
+              : (item.gasPrice as bigint))) ||
       (item.transactionHash != null &&
-        !/^0x[0-9a-fA-F]{64}$/.test(item.transactionHash)) ||
+        (typeof item.transactionHash !== "string" ||
+          !/^0x[0-9a-fA-F]{64}$/.test(item.transactionHash))) ||
       (item.receiptStatus != null &&
         item.receiptStatus !== "success" &&
         item.receiptStatus !== "reverted") ||
@@ -121,12 +218,16 @@ function assertCheckpoint(
           item.destinationMinimum < 0n ||
           typeof item.quoteId !== "string" ||
           item.quoteId === "" ||
+          (item.requestId != null &&
+            (typeof item.requestId !== "string" || item.requestId === "")) ||
           !Number.isSafeInteger(item.fromChainId) ||
-          !Number.isSafeInteger(item.toChainId))) ||
-      (item.kind !== "route" && item.destinationMinimum != null)
+          (item.fromChainId as number) <= 0 ||
+          !Number.isSafeInteger(item.toChainId) ||
+          (item.toChainId as number) <= 0))
     )
       throw new Error("Checkpoint has invalid execution steps")
     seen.add(itemKey)
+    if (transactionHash != null) transactionHashes.add(transactionHash)
   }
 }
 
@@ -162,6 +263,30 @@ function assertQuote(
     throw new Error("Refreshed Squid route failed execution trust checks")
 }
 
+async function assertSubmittedIntent(
+  client: SquidPublicClient,
+  step: SquidExecutionStep,
+) {
+  if (step.transactionHash == null) return
+  const transaction = await client.getTransaction({
+    hash: step.transactionHash,
+  })
+  if (
+    transaction == null ||
+    transaction.to == null ||
+    !sameAddress(transaction.from, step.from) ||
+    !sameAddress(transaction.to, step.to) ||
+    keccak256(transaction.input) !== step.dataHash ||
+    transaction.value !== step.value ||
+    transaction.nonce !== step.nonce ||
+    transaction.gas !== step.gas ||
+    transaction.maxFeePerGas !== step.maxFeePerGas ||
+    transaction.maxPriorityFeePerGas !== step.maxPriorityFeePerGas ||
+    transaction.gasPrice !== step.gasPrice
+  )
+    throw new Error("Checkpoint transaction does not match its saved intent")
+}
+
 async function balance(
   client: SquidPublicClient,
   token: Address,
@@ -193,15 +318,38 @@ async function prepare(
     client.estimateGas({ account, ...base }),
     client.estimateFeesPerGas(),
   ])
-  const perGas = fees.maxFeePerGas ?? fees.gasPrice
-  if (perGas == null) throw new Error("Complete execution fee is unavailable")
-  const feeFields =
-    fees.maxFeePerGas == null ? { gasPrice: perGas } : { maxFeePerGas: perGas }
+  let feeFields:
+    | { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }
+    | { gasPrice: bigint }
+  let perGas: bigint
+  if (
+    fees.maxFeePerGas != null &&
+    fees.maxPriorityFeePerGas != null &&
+    fees.maxFeePerGas > 0n &&
+    fees.maxPriorityFeePerGas >= 0n &&
+    fees.maxPriorityFeePerGas <= fees.maxFeePerGas
+  ) {
+    feeFields = {
+      maxFeePerGas: fees.maxFeePerGas,
+      maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+    }
+    perGas = fees.maxFeePerGas
+  } else if (
+    fees.maxFeePerGas == null &&
+    fees.gasPrice != null &&
+    fees.gasPrice > 0n
+  ) {
+    feeFields = { gasPrice: fees.gasPrice }
+    perGas = fees.gasPrice
+  } else {
+    throw new Error("Complete execution fee is unavailable")
+  }
+  if (gas <= 0n) throw new Error("Complete execution fee is unavailable")
   const request = { ...base, gas, ...feeFields }
   if (feeMode === "standard") return { fee: gas * perGas, request }
   if (client.estimateTotalFee == null || buffer == null)
     throw new Error("OP Stack total-fee accounting and buffer are required")
-  const total = await client.estimateTotalFee({ account, ...base })
+  const total = await client.estimateTotalFee({ account, ...request })
   const buffered = buffer(total)
   if (buffered < total)
     throw new Error("OP Stack fee buffer must not reduce the total fee")
@@ -222,6 +370,7 @@ export async function executeSquidFunding(
     feeMode: "standard" | "op-stack"
     opStackFeeBuffer?: (totalFee: bigint) => bigint
     maxPollAttempts: number
+    pollIntervalMs: number
   },
   dependencies: {
     publicClient: SquidPublicClient
@@ -236,6 +385,7 @@ export async function executeSquidFunding(
     load: () => Promise<SquidExecutionCheckpoint | undefined>
     save: (checkpoint: SquidExecutionCheckpoint) => Promise<void>
     now?: () => number
+    sleep?: (milliseconds: number) => Promise<void>
   },
 ): Promise<SquidExecutionCheckpoint> {
   if (
@@ -244,7 +394,10 @@ export async function executeSquidFunding(
     input.maxNativeFee < 0n ||
     (input.feeMode !== "standard" && input.feeMode !== "op-stack") ||
     !Number.isSafeInteger(input.maxPollAttempts) ||
-    input.maxPollAttempts <= 0
+    input.maxPollAttempts <= 0 ||
+    !Number.isSafeInteger(input.pollIntervalMs) ||
+    input.pollIntervalMs <= 0 ||
+    input.pollIntervalMs > MAX_POLL_INTERVAL_MS
   )
     throw new Error("Execution limits and at least one quote are required")
   const ids = new Set(input.quotes.map((quote) => quote.requirement.id))
@@ -262,13 +415,18 @@ export async function executeSquidFunding(
   )
     throw new Error("Wallet client does not control the requested account")
   if (
+    native(input.source.token) !== input.source.native ||
     input.quotes.some(
       (quote) =>
         !sameAddress(quote.source.token, input.source.token) ||
-        quote.source.chain.chainId !== input.source.chain.chainId,
+        quote.source.chain.chainId !== input.source.chain.chainId ||
+        quote.source.native !== input.source.native ||
+        native(quote.source.token) !== quote.source.native,
     )
   )
-    throw new Error("All execution quotes must use the supplied source token")
+    throw new Error(
+      "All execution quotes must use the supplied source identity",
+    )
   const sourceAmount = input.quotes.reduce(
     (total, quote) => total + quote.sourceAmount,
     0n,
@@ -277,11 +435,16 @@ export async function executeSquidFunding(
     throw new Error("Execution would exceed the source-token cap")
   const id = executionId(input)
   let checkpoint = (await dependencies.load()) ?? { executionId: id, steps: [] }
-  assertCheckpoint(checkpoint, id, ids)
+  assertCheckpoint(checkpoint, id, ids, input.feeMode)
   if (checkpoint.steps.some((item) => item.transactionHash == null))
     throw new Error(
       "Checkpoint intent has no transaction hash; reconcile manually before resuming",
     )
+  await Promise.all(
+    checkpoint.steps.map((step) =>
+      assertSubmittedIntent(dependencies.publicClient, step),
+    ),
+  )
   let totalNativeFee = checkpoint.steps.reduce(
     (total, item) => total + item.nativeFee,
     0n,
@@ -355,7 +518,18 @@ export async function executeSquidFunding(
       kind,
       requirementId,
       nativeFee: prepared.fee,
+      from: input.account,
+      to: prepared.request.to,
+      dataHash: keccak256(prepared.request.data),
+      value: prepared.request.value,
       nonce: prepared.request.nonce,
+      gas: prepared.request.gas,
+      ...("gasPrice" in prepared.request
+        ? { gasPrice: prepared.request.gasPrice }
+        : {
+            maxFeePerGas: prepared.request.maxFeePerGas,
+            maxPriorityFeePerGas: prepared.request.maxPriorityFeePerGas,
+          }),
       ...(destinationMinimum == null ? {} : { destinationMinimum }),
       ...(statusReference == null ? {} : statusReference),
     }
@@ -526,6 +700,8 @@ export async function executeSquidFunding(
         done = true
         break
       }
+      if (attempt + 1 < input.maxPollAttempts)
+        await (dependencies.sleep ?? sleep)(input.pollIntervalMs)
     }
     if (!done)
       throw new Error("Squid route did not complete within the poll limit")
