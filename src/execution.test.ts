@@ -1,4 +1,4 @@
-import { decodeFunctionData, erc20Abi } from "viem"
+import { type Account, decodeFunctionData, erc20Abi } from "viem"
 import { describe, expect, it } from "vitest"
 import {
   executeSquidFunding,
@@ -13,6 +13,7 @@ const sourceToken = "0x2222222222222222222222222222222222222222" as const
 const destinationToken = "0x3333333333333333333333333333333333333333" as const
 const target = "0x4444444444444444444444444444444444444444" as const
 const spender = "0x5555555555555555555555555555555555555555" as const
+const thirdParty = "0x6666666666666666666666666666666666666666" as const
 const hash =
   "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const
 
@@ -54,6 +55,9 @@ function clients(
     destinationNativeBalances?: bigint[]
     totalFee?: bigint
     sourceNativeBalance?: bigint
+    walletAccount?: Account
+    walletChainId?: number
+    getAddressesError?: Error
   } = {},
 ) {
   const calls: {
@@ -61,6 +65,7 @@ function clients(
     status: number
     estimateGas: number
     totalFee: number
+    getAddresses: number
     sent: unknown[]
     totalFeeRequests: unknown[]
   } = {
@@ -68,6 +73,7 @@ function clients(
     status: 0,
     estimateGas: 0,
     totalFee: 0,
+    getAddresses: 0,
     sent: [],
     totalFeeRequests: [],
   }
@@ -78,7 +84,7 @@ function clients(
   const source = {
     getChainId: async () => 1,
     getBalance: async () => options.sourceNativeBalance ?? 1_000n,
-    getTransactionCount: async () => 7,
+    getTransactionCount: async () => 7 + calls.send,
     getTransaction: async ({ hash: transactionHash }: { hash: string }) =>
       transactions.get(transactionHash) ?? null,
     estimateGas: async () => {
@@ -120,7 +126,13 @@ function clients(
       ] as bigint,
   } as unknown as SquidPublicClient
   const wallet = {
-    getAddresses: async () => [account],
+    account: options.walletAccount,
+    getChainId: async () => options.walletChainId ?? 1,
+    getAddresses: async () => {
+      calls.getAddresses += 1
+      if (options.getAddressesError != null) throw options.getAddressesError
+      return [account]
+    },
     sendTransaction: async (request: unknown) => {
       calls.send += 1
       calls.sent.push(request)
@@ -141,7 +153,15 @@ function clients(
       return transactionHash
     },
   } as unknown as SquidWalletClient
-  return { source, destination, wallet, calls }
+  return {
+    source,
+    destination,
+    wallet,
+    calls,
+    setAllowance: (next: bigint) => {
+      allowance = next
+    },
+  }
 }
 
 function input(quotes: readonly SquidQuote[] = [quote()]) {
@@ -243,6 +263,41 @@ describe("bounded Squid execution", () => {
     expect(mocked.calls.send).toBe(2)
   })
 
+  it("preserves the larger floor when native source also pays gas", async () => {
+    const nativeSource = {
+      chain: { chainId: 1, networkName: "Ethereum" },
+      token: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" as const,
+      symbol: "ETH",
+      decimals: 18,
+      native: true,
+    }
+    const mocked = clients({ sourceNativeBalance: 110n })
+    await expect(
+      executeSquidFunding(
+        {
+          ...input([quote({ source: nativeSource, value: 10n })]),
+          sourceBalanceFloor: 100n,
+          nativeBalanceFloor: 10n,
+        },
+        dependencies(mocked),
+      ),
+    ).rejects.toThrow("source amount, fee, and floor")
+    expect(mocked.calls.send).toBe(0)
+  })
+
+  it("supports a destination recipient distinct from the signer", async () => {
+    const mocked = clients()
+    await executeSquidFunding(
+      input([
+        quote({
+          requirement: { ...quote().requirement, recipient: thirdParty },
+        }),
+      ]),
+      dependencies(mocked),
+    )
+    expect(mocked.calls.send).toBe(2)
+  })
+
   it("resets an overbroad allowance and sends fee-bounded transactions", async () => {
     const mocked = clients({ allowance: 20n })
     await executeSquidFunding(input(), dependencies(mocked))
@@ -317,6 +372,30 @@ describe("bounded Squid execution", () => {
       "trust checks",
     )
     expect(mocked.calls.send).toBe(0)
+  })
+
+  it("rechecks each quote expiry at its actual send boundary", async () => {
+    const first = quote()
+    const second = quote({
+      requirement: { ...first.requirement, id: "fund-2" },
+    })
+    const mocked = clients({ allowance: 10n })
+    const estimateGas = mocked.source.estimateGas.bind(mocked.source)
+    let clock = 0
+    mocked.source.estimateGas = async (request) => {
+      const gas = await estimateGas(request)
+      if (mocked.calls.estimateGas === 2) clock = second.expiresAt * 1_000
+      return gas
+    }
+    const deps = dependencies(mocked)
+    deps.now = () => clock
+    await expect(
+      executeSquidFunding(
+        { ...input([first, second]), maxSourceAmount: 20n },
+        deps,
+      ),
+    ).rejects.toThrow("trust checks")
+    expect(mocked.calls.send).toBe(1)
   })
 
   it("never redirects approval to a provider-supplied spender", async () => {
@@ -435,6 +514,106 @@ describe("bounded Squid execution", () => {
     expect(mocked.calls.status).toBe(2)
   })
 
+  it("reconciles pending hashes before checking balance for a later send", async () => {
+    const first = quote()
+    const second = quote({
+      requirement: { ...first.requirement, id: "fund-2" },
+    })
+    const mocked = clients({
+      allowance: 10n,
+      destinationBalances: [0n, 10n, 10n, 10n],
+    })
+    const initial = dependencies(mocked)
+    let refreshes = 0
+    initial.refreshQuote = async (planned) => {
+      refreshes += 1
+      return refreshes === 1
+        ? { ...planned, id: "first-route" }
+        : { ...planned, target: spender }
+    }
+    await expect(
+      executeSquidFunding(
+        { ...input([first, second]), maxSourceAmount: 20n },
+        initial,
+      ),
+    ).rejects.toThrow("trust checks")
+    const completed = initial.saved().at(-1)
+    expect(completed).toBeDefined()
+    const pending = {
+      ...(completed as SquidExecutionCheckpoint),
+      steps: (completed as SquidExecutionCheckpoint).steps.map((step) => ({
+        ...step,
+        receiptStatus: undefined,
+      })),
+    }
+    let sourceBalance = 100n
+    const readContract = mocked.source.readContract.bind(mocked.source)
+    mocked.source.readContract = async (request: { functionName: string }) =>
+      request.functionName === "balanceOf"
+        ? sourceBalance
+        : readContract(request as never)
+    const waitForReceipt = mocked.source.waitForTransactionReceipt.bind(
+      mocked.source,
+    )
+    mocked.source.waitForTransactionReceipt = async (request) => {
+      const receipt = await waitForReceipt(request)
+      sourceBalance = 5n
+      return receipt
+    }
+    const sends = mocked.calls.send
+    await expect(
+      executeSquidFunding(
+        { ...input([first, second]), maxSourceAmount: 20n },
+        dependencies(mocked, pending),
+      ),
+    ).rejects.toThrow("Source-token balance")
+    expect(mocked.calls.send).toBe(sends)
+  })
+
+  it("re-approves a revoked allowance without dropping prior fee history", async () => {
+    const mocked = clients({ destinationBalances: [0n, 0n, 0n, 10n] })
+    const initial = dependencies(mocked)
+    let refreshes = 0
+    initial.refreshQuote = async (planned) => {
+      refreshes += 1
+      return refreshes === 1
+        ? { ...planned, id: "before-approval" }
+        : { ...planned, target: spender }
+    }
+    await expect(executeSquidFunding(input(), initial)).rejects.toThrow(
+      "trust checks",
+    )
+    const approvalCheckpoint = initial.saved().at(-1)
+    expect(approvalCheckpoint).toBeDefined()
+    expect(
+      (approvalCheckpoint as SquidExecutionCheckpoint).steps.map(
+        (step) => step.attempt,
+      ),
+    ).toEqual([0])
+    mocked.setAllowance(0n)
+    const sends = mocked.calls.send
+    await expect(
+      executeSquidFunding(
+        { ...input(), maxNativeFee: 11n },
+        dependencies(mocked, approvalCheckpoint as SquidExecutionCheckpoint),
+      ),
+    ).rejects.toThrow("total-native-fee cap")
+    expect(mocked.calls.send).toBe(sends)
+
+    const completed = await executeSquidFunding(
+      input(),
+      dependencies(mocked, approvalCheckpoint as SquidExecutionCheckpoint),
+    )
+    expect(
+      completed.steps
+        .filter((step) => step.kind === "approval")
+        .map((step) => step.attempt),
+    ).toEqual([0, 1])
+    expect(
+      completed.steps.reduce((total, step) => total + step.nativeFee, 0n),
+    ).toBe(18n)
+  })
+
   it("verifies every resumed hash against its complete saved intent", async () => {
     const mocked = clients()
     const checkpoint = await executeSquidFunding(input(), dependencies(mocked))
@@ -451,6 +630,112 @@ describe("bounded Squid execution", () => {
     await expect(
       executeSquidFunding(input(), dependencies(mocked, checkpoint)),
     ).rejects.toThrow("saved intent")
+  })
+
+  it("ignores a derived gasPrice when verifying an EIP-1559 transaction", async () => {
+    const mocked = clients()
+    const checkpoint = await executeSquidFunding(input(), dependencies(mocked))
+    const sends = mocked.calls.send
+    const original = mocked.source.getTransaction.bind(mocked.source)
+    mocked.source.getTransaction = async (request: { hash: typeof hash }) => {
+      const transaction = await original(request)
+      return transaction == null
+        ? transaction
+        : { ...transaction, gasPrice: 2n }
+    }
+    await executeSquidFunding(input(), dependencies(mocked, checkpoint))
+    expect(mocked.calls.send).toBe(sends)
+  })
+
+  it("requires an exact gasPrice and no EIP-1559 fields for legacy intent", async () => {
+    const mocked = clients()
+    mocked.source.estimateFeesPerGas = async () => ({ gasPrice: 3n })
+    const checkpoint = await executeSquidFunding(input(), dependencies(mocked))
+    const sends = mocked.calls.send
+    await executeSquidFunding(input(), dependencies(mocked, checkpoint))
+    expect(mocked.calls.send).toBe(sends)
+
+    const original = mocked.source.getTransaction.bind(mocked.source)
+    mocked.source.getTransaction = async (request: { hash: typeof hash }) => {
+      const transaction = await original(request)
+      return transaction == null
+        ? transaction
+        : { ...transaction, maxFeePerGas: 3n, maxPriorityFeePerGas: 1n }
+    }
+    await expect(
+      executeSquidFunding(input(), dependencies(mocked, checkpoint)),
+    ).rejects.toThrow("saved intent")
+  })
+
+  it("passes a configured local account through without address discovery", async () => {
+    const localAccount = { address: account } as Account
+    const mocked = clients({
+      walletAccount: localAccount,
+      getAddressesError: new Error("address discovery should not run"),
+    })
+    await executeSquidFunding(input(), dependencies(mocked))
+    expect(mocked.calls.getAddresses).toBe(0)
+    expect(mocked.calls.sent[0]).toEqual(
+      expect.objectContaining({ account: localAccount }),
+    )
+  })
+
+  it("rejects the wrong local account or wallet chain before broadcasting", async () => {
+    const wrongAccount = clients({
+      walletAccount: { address: thirdParty } as Account,
+    })
+    await expect(
+      executeSquidFunding(input(), dependencies(wrongAccount)),
+    ).rejects.toThrow("does not control")
+    expect(wrongAccount.calls.send).toBe(0)
+
+    const wrongChain = clients({ walletChainId: 10 })
+    await expect(
+      executeSquidFunding(input(), dependencies(wrongChain)),
+    ).rejects.toThrow("Wallet chain")
+    expect(wrongChain.calls.send).toBe(0)
+  })
+
+  it("rejects negative floors and nonpositive quote amounts", async () => {
+    const negativeSourceFloor = clients()
+    await expect(
+      executeSquidFunding(
+        { ...input(), sourceBalanceFloor: -1n },
+        dependencies(negativeSourceFloor),
+      ),
+    ).rejects.toThrow("Execution limits")
+    expect(negativeSourceFloor.calls.send).toBe(0)
+
+    const negativeNativeFloor = clients()
+    await expect(
+      executeSquidFunding(
+        { ...input(), nativeBalanceFloor: -1n },
+        dependencies(negativeNativeFloor),
+      ),
+    ).rejects.toThrow("Execution limits")
+    expect(negativeNativeFloor.calls.send).toBe(0)
+
+    const zeroSource = clients()
+    await expect(
+      executeSquidFunding(
+        input([quote({ sourceAmount: 0n })]),
+        dependencies(zeroSource),
+      ),
+    ).rejects.toThrow("Execution limits")
+    expect(zeroSource.calls.send).toBe(0)
+
+    const zeroRequirement = clients()
+    await expect(
+      executeSquidFunding(
+        input([
+          quote({
+            requirement: { ...quote().requirement, amount: 0n },
+          }),
+        ]),
+        dependencies(zeroRequirement),
+      ),
+    ).rejects.toThrow("Execution limits")
+    expect(zeroRequirement.calls.send).toBe(0)
   })
 
   it("rejects duplicate hashes and malformed checkpoint step shapes", async () => {
@@ -506,6 +791,16 @@ describe("bounded Squid execution", () => {
     } as unknown as SquidExecutionCheckpoint
     await expect(
       executeSquidFunding(input(), dependencies(mocked, malformedHash)),
+    ).rejects.toThrow("invalid execution steps")
+
+    const noncontiguousAttempt = {
+      ...checkpoint,
+      steps: checkpoint.steps.map((step) =>
+        step.kind === "approval" ? { ...step, attempt: 2 } : step,
+      ),
+    }
+    await expect(
+      executeSquidFunding(input(), dependencies(mocked, noncontiguousAttempt)),
     ).rejects.toThrow("invalid execution steps")
   })
 

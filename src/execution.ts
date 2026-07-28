@@ -32,6 +32,7 @@ type Transaction = {
 const COMMON_STEP_KEYS = [
   "kind",
   "requirementId",
+  "attempt",
   "nativeFee",
   "from",
   "to",
@@ -70,8 +71,12 @@ function sleep(milliseconds: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds))
 }
 
-function key(kind: SquidExecutionStep["kind"], requirementId: string) {
-  return `${kind}:${requirementId}`
+function key(
+  kind: SquidExecutionStep["kind"],
+  requirementId: string,
+  attempt: number,
+) {
+  return `${kind}:${requirementId}:${attempt}`
 }
 
 function executionId(input: {
@@ -108,8 +113,14 @@ function current(
   kind: SquidExecutionStep["kind"],
   requirementId: string,
 ) {
-  return checkpoint.steps.find(
-    (item) => item.kind === kind && item.requirementId === requirementId,
+  return checkpoint.steps.reduce<SquidExecutionStep | undefined>(
+    (latest, item) =>
+      item.kind === kind &&
+      item.requirementId === requirementId &&
+      (latest == null || item.attempt > latest.attempt)
+        ? item
+        : latest,
+    undefined,
   )
 }
 
@@ -122,8 +133,8 @@ function withStep(
     steps: [
       ...checkpoint.steps.filter(
         (item) =>
-          key(item.kind, item.requirementId) !==
-          key(next.kind, next.requirementId),
+          key(item.kind, item.requirementId, item.attempt) !==
+          key(next.kind, next.requirementId, next.attempt),
       ),
       next,
     ],
@@ -149,6 +160,9 @@ function assertCheckpoint(
     throw new Error("Checkpoint does not match this execution")
   const seen = new Set<string>()
   const transactionHashes = new Set<string>()
+  const approvalAttempts = new Map<string, Set<number>>()
+  const resetAttempts = new Map<string, Set<number>>()
+  const routeRequirements = new Set<string>()
   for (const item of checkpoint.steps) {
     if (item == null || typeof item !== "object")
       throw new Error("Checkpoint has invalid execution steps")
@@ -158,13 +172,18 @@ function assertCheckpoint(
       item.kind !== "route"
     )
       throw new Error("Checkpoint has invalid execution steps")
-    if (typeof item.requirementId !== "string")
+    if (
+      typeof item.requirementId !== "string" ||
+      !Number.isSafeInteger(item.attempt) ||
+      item.attempt < 0 ||
+      (item.kind === "route" && item.attempt !== 0)
+    )
       throw new Error("Checkpoint has invalid execution steps")
     const allowedKeys =
       item.kind === "route" ? ROUTE_STEP_KEYS : APPROVAL_STEP_KEYS
     if (Object.keys(item).some((itemKey) => !allowedKeys.has(itemKey)))
       throw new Error("Checkpoint has invalid execution steps")
-    const itemKey = key(item.kind, item.requirementId)
+    const itemKey = key(item.kind, item.requirementId, item.attempt)
     const eip1559Fees =
       typeof item.maxFeePerGas === "bigint" &&
       item.maxFeePerGas > 0n &&
@@ -228,13 +247,46 @@ function assertCheckpoint(
       throw new Error("Checkpoint has invalid execution steps")
     seen.add(itemKey)
     if (transactionHash != null) transactionHashes.add(transactionHash)
+    if (item.kind === "route") routeRequirements.add(item.requirementId)
+    else {
+      const attempts =
+        item.kind === "approval" ? approvalAttempts : resetAttempts
+      const values = attempts.get(item.requirementId) ?? new Set<number>()
+      values.add(item.attempt)
+      attempts.set(item.requirementId, values)
+    }
+  }
+  for (const requirementId of requirementIds) {
+    const approvals = approvalAttempts.get(requirementId) ?? new Set<number>()
+    const resets = resetAttempts.get(requirementId) ?? new Set<number>()
+    const combined = new Set([...approvals, ...resets])
+    if (combined.size === 0) continue
+    const highest = Math.max(...combined)
+    for (let attempt = 0; attempt <= highest; attempt += 1) {
+      if (!combined.has(attempt))
+        throw new Error("Checkpoint has invalid execution steps")
+    }
+    if (approvals.size > 0) {
+      const highestApproval = Math.max(...approvals)
+      for (let attempt = 0; attempt <= highestApproval; attempt += 1) {
+        if (!approvals.has(attempt))
+          throw new Error("Checkpoint has invalid execution steps")
+      }
+    }
+    if (
+      [...resets].some(
+        (attempt) =>
+          !approvals.has(attempt) &&
+          (attempt !== highest || routeRequirements.has(requirementId)),
+      )
+    )
+      throw new Error("Checkpoint has invalid execution steps")
   }
 }
 
 function assertQuote(
   planned: SquidQuote,
   refreshed: SquidQuote,
-  account: Address,
   target: Address,
   spender: Address,
   now: number,
@@ -247,7 +299,10 @@ function assertQuote(
     refreshed.source.native !== planned.source.native ||
     refreshed.requirement.chainId !== planned.requirement.chainId ||
     !sameAddress(refreshed.requirement.token, planned.requirement.token) ||
-    !sameAddress(refreshed.requirement.recipient, account) ||
+    !sameAddress(
+      refreshed.requirement.recipient,
+      planned.requirement.recipient,
+    ) ||
     refreshed.destinationAmount < planned.requirement.amount ||
     !sameAddress(refreshed.target, target) ||
     (planned.approvalSpender != null &&
@@ -271,6 +326,13 @@ async function assertSubmittedIntent(
   const transaction = await client.getTransaction({
     hash: step.transactionHash,
   })
+  const feeMatches =
+    step.maxFeePerGas != null
+      ? transaction?.maxFeePerGas === step.maxFeePerGas &&
+        transaction.maxPriorityFeePerGas === step.maxPriorityFeePerGas
+      : transaction?.maxFeePerGas == null &&
+        transaction?.maxPriorityFeePerGas == null &&
+        transaction?.gasPrice === step.gasPrice
   if (
     transaction == null ||
     transaction.to == null ||
@@ -280,9 +342,7 @@ async function assertSubmittedIntent(
     transaction.value !== step.value ||
     transaction.nonce !== step.nonce ||
     transaction.gas !== step.gas ||
-    transaction.maxFeePerGas !== step.maxFeePerGas ||
-    transaction.maxPriorityFeePerGas !== step.maxPriorityFeePerGas ||
-    transaction.gasPrice !== step.gasPrice
+    !feeMatches
   )
     throw new Error("Checkpoint transaction does not match its saved intent")
 }
@@ -392,6 +452,11 @@ export async function executeSquidFunding(
     input.quotes.length === 0 ||
     input.maxSourceAmount <= 0n ||
     input.maxNativeFee < 0n ||
+    (input.sourceBalanceFloor ?? 0n) < 0n ||
+    (input.nativeBalanceFloor ?? 0n) < 0n ||
+    input.quotes.some(
+      (quote) => quote.sourceAmount <= 0n || quote.requirement.amount <= 0n,
+    ) ||
     (input.feeMode !== "standard" && input.feeMode !== "op-stack") ||
     !Number.isSafeInteger(input.maxPollAttempts) ||
     input.maxPollAttempts <= 0 ||
@@ -409,9 +474,17 @@ export async function executeSquidFunding(
   )
     throw new Error("Source RPC chain does not match the Squid source chain")
   if (
-    !(await dependencies.walletClient.getAddresses()).some((address) =>
-      sameAddress(address, input.account),
-    )
+    (await dependencies.walletClient.getChainId()) !==
+    input.source.chain.chainId
+  )
+    throw new Error("Wallet chain does not match the Squid source chain")
+  const configuredAccount = dependencies.walletClient.account
+  if (
+    configuredAccount != null
+      ? !sameAddress(configuredAccount.address, input.account)
+      : !(await dependencies.walletClient.getAddresses()).some((address) =>
+          sameAddress(address, input.account),
+        )
   )
     throw new Error("Wallet client does not control the requested account")
   if (
@@ -445,56 +518,61 @@ export async function executeSquidFunding(
       assertSubmittedIntent(dependencies.publicClient, step),
     ),
   )
+  for (const step of checkpoint.steps) {
+    if (step.receiptStatus === "reverted")
+      throw new Error("Checkpoint contains a reverted transaction")
+    if (step.receiptStatus == null && step.transactionHash != null) {
+      const receipt = await dependencies.publicClient.waitForTransactionReceipt(
+        { hash: step.transactionHash },
+      )
+      checkpoint = withStep(checkpoint, {
+        ...step,
+        receiptStatus: receipt.status,
+      })
+      await dependencies.save(checkpoint)
+      if (receipt.status !== "success")
+        throw new Error("Resumed transaction reverted")
+    }
+  }
   let totalNativeFee = checkpoint.steps.reduce(
     (total, item) => total + item.nativeFee,
     0n,
   )
   if (totalNativeFee > input.maxNativeFee)
     throw new Error("Checkpoint exceeds the total-native-fee cap")
-  const unsent = input.quotes.filter(
-    (quote) => current(checkpoint, "route", quote.requirement.id) == null,
-  )
-  const unsentSource = unsent.reduce(
-    (total, quote) => total + quote.sourceAmount,
-    0n,
-  )
-  const [sourceBalance, nativeBalance, nonce] = await Promise.all([
-    balance(dependencies.publicClient, input.source.token, input.account),
-    dependencies.publicClient.getBalance({ address: input.account }),
-    dependencies.publicClient.getTransactionCount({
-      address: input.account,
-      blockTag: "pending",
-    }),
-  ])
-  if (sourceBalance < unsentSource + (input.sourceBalanceFloor ?? 0n))
-    throw new Error("Source-token balance would cross its required floor")
+  const nonce = await dependencies.publicClient.getTransactionCount({
+    address: input.account,
+    blockTag: "pending",
+  })
   let nextNonce = nonce
-  let newNativeFee = 0n
-  let routeNativeValue = 0n
-  const now = Math.floor((dependencies.now ?? Date.now)() / 1000)
+
+  const unsentSource = () =>
+    input.quotes.reduce(
+      (total, quote) =>
+        current(checkpoint, "route", quote.requirement.id) == null
+          ? total + quote.sourceAmount
+          : total,
+      0n,
+    )
 
   const run = async (
     kind: SquidExecutionStep["kind"],
     requirementId: string,
+    attempt: number,
     transaction: Transaction,
     destinationMinimum?: bigint,
     statusReference?: SquidStatusReference,
+    preSend?: () => void,
   ) => {
-    const known = current(checkpoint, kind, requirementId)
+    const known = checkpoint.steps.find(
+      (step) =>
+        step.kind === kind &&
+        step.requirementId === requirementId &&
+        step.attempt === attempt,
+    )
     if (known?.receiptStatus === "success") return known
-    if (known?.transactionHash != null) {
-      const receipt = await dependencies.publicClient.waitForTransactionReceipt(
-        { hash: known.transactionHash },
-      )
-      checkpoint = withStep(checkpoint, {
-        ...known,
-        receiptStatus: receipt.status,
-      })
-      await dependencies.save(checkpoint)
-      if (receipt.status !== "success")
-        throw new Error("Resumed transaction reverted")
-      return current(checkpoint, kind, requirementId) as SquidExecutionStep
-    }
+    if (known != null)
+      throw new Error("Checkpoint transaction is not reconciled")
     const prepared = await prepare(
       dependencies.publicClient,
       { ...transaction, nonce: nextNonce },
@@ -504,19 +582,37 @@ export async function executeSquidFunding(
     )
     if (totalNativeFee + prepared.fee > input.maxNativeFee)
       throw new Error("Execution would exceed the total-native-fee cap")
-    totalNativeFee += prepared.fee
-    newNativeFee += prepared.fee
-    const nativeUse = input.source.native ? unsentSource : routeNativeValue
-    if (
-      nativeBalance <
-      (input.nativeBalanceFloor ?? 0n) + nativeUse + newNativeFee
-    )
-      throw new Error(
-        "Native balance would not cover the source amount and fees",
+    const [nativeBalance, sourceBalance] = await Promise.all([
+      dependencies.publicClient.getBalance({ address: input.account }),
+      input.source.native
+        ? Promise.resolve(undefined)
+        : balance(dependencies.publicClient, input.source.token, input.account),
+    ])
+    const remainingSource = unsentSource()
+    if (input.source.native) {
+      const floor =
+        (input.sourceBalanceFloor ?? 0n) > (input.nativeBalanceFloor ?? 0n)
+          ? (input.sourceBalanceFloor ?? 0n)
+          : (input.nativeBalanceFloor ?? 0n)
+      if (nativeBalance < floor + remainingSource + prepared.fee)
+        throw new Error(
+          "Native balance would not cover the source amount, fee, and floor",
+        )
+    } else {
+      if (
+        sourceBalance == null ||
+        sourceBalance < remainingSource + (input.sourceBalanceFloor ?? 0n)
       )
+        throw new Error("Source-token balance would cross its required floor")
+      if (nativeBalance < prepared.fee + (input.nativeBalanceFloor ?? 0n))
+        throw new Error("Native balance would not cover the fee and floor")
+    }
+    preSend?.()
+    totalNativeFee += prepared.fee
     const intent: SquidExecutionStep = {
       kind,
       requirementId,
+      attempt,
       nativeFee: prepared.fee,
       from: input.account,
       to: prepared.request.to,
@@ -536,7 +632,7 @@ export async function executeSquidFunding(
     checkpoint = withStep(checkpoint, intent)
     await dependencies.save(checkpoint)
     const transactionHash = (await dependencies.walletClient.sendTransaction({
-      account: input.account,
+      account: configuredAccount ?? input.account,
       chain: undefined,
       ...prepared.request,
     } as never)) as Hash
@@ -564,10 +660,9 @@ export async function executeSquidFunding(
       assertQuote(
         planned,
         refreshed,
-        input.account,
         input.trustedTarget,
         input.trustedSpender,
-        now,
+        Math.floor((dependencies.now ?? Date.now)() / 1000),
       )
     const destinationClient = dependencies.destinationClient(
       planned.requirement.chainId,
@@ -588,23 +683,41 @@ export async function executeSquidFunding(
         functionName: "allowance",
         args: [input.account, input.trustedSpender],
       })
-      let approvalChanged =
-        current(checkpoint, "approval-reset", planned.requirement.id) != null ||
-        current(checkpoint, "approval", planned.requirement.id) != null
-      if (allowance !== refreshed.sourceAmount && allowance > 0n)
-        await run("approval-reset", planned.requirement.id, {
-          to: input.source.token,
-          data: encodeFunctionData({
-            abi: erc20Abi,
-            functionName: "approve",
-            args: [input.trustedSpender, 0n],
-          }),
-          value: 0n,
-          nonce: 0,
-        })
-      if (allowance !== refreshed.sourceAmount) approvalChanged = true
-      if (allowance !== refreshed.sourceAmount)
-        await run("approval", planned.requirement.id, {
+      const previousApproval = current(
+        checkpoint,
+        "approval",
+        planned.requirement.id,
+      )
+      const previousReset = current(
+        checkpoint,
+        "approval-reset",
+        planned.requirement.id,
+      )
+      let approvalChanged = previousApproval != null || previousReset != null
+      if (allowance !== refreshed.sourceAmount) {
+        approvalChanged = true
+        const approvalAttempt =
+          allowance === 0n &&
+          previousReset != null &&
+          (previousApproval == null ||
+            previousReset.attempt > previousApproval.attempt)
+            ? previousReset.attempt
+            : Math.max(
+                previousApproval?.attempt ?? -1,
+                previousReset?.attempt ?? -1,
+              ) + 1
+        if (allowance > 0n)
+          await run("approval-reset", planned.requirement.id, approvalAttempt, {
+            to: input.source.token,
+            data: encodeFunctionData({
+              abi: erc20Abi,
+              functionName: "approve",
+              args: [input.trustedSpender, 0n],
+            }),
+            value: 0n,
+            nonce: 0,
+          })
+        await run("approval", planned.requirement.id, approvalAttempt, {
           to: input.source.token,
           data: encodeFunctionData({
             abi: erc20Abi,
@@ -614,12 +727,12 @@ export async function executeSquidFunding(
           value: 0n,
           nonce: 0,
         })
+      }
       if (approvalChanged) {
         refreshed = await dependencies.refreshQuote(planned)
         assertQuote(
           planned,
           refreshed,
-          input.account,
           input.trustedTarget,
           input.trustedSpender,
           Math.floor((dependencies.now ?? Date.now)() / 1000),
@@ -636,10 +749,10 @@ export async function executeSquidFunding(
           )
       }
     }
-    if (route == null) routeNativeValue += refreshed.value
     const completed = await run(
       "route",
       planned.requirement.id,
+      0,
       {
         to: refreshed.target,
         data: refreshed.data,
@@ -656,6 +769,16 @@ export async function executeSquidFunding(
             fromChainId: refreshed.source.chain.chainId,
             toChainId: refreshed.requirement.chainId,
           }
+        : undefined,
+      route == null
+        ? () =>
+            assertQuote(
+              planned,
+              refreshed,
+              input.trustedTarget,
+              input.trustedSpender,
+              Math.floor((dependencies.now ?? Date.now)() / 1000),
+            )
         : undefined,
     )
     const hash = completed.transactionHash

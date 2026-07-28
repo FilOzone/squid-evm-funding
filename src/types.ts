@@ -59,6 +59,7 @@ export interface SquidClientOptions {
 export interface SquidExecutionStep {
   kind: "approval" | "approval-reset" | "route"
   requirementId: string
+  attempt: number
   nativeFee: bigint
   from: Address
   to: Address
@@ -117,5 +118,5 @@ export type SquidPublicClient = Pick<
 
 export type SquidWalletClient = Pick<
   WalletClient,
-  "getAddresses" | "sendTransaction"
+  "account" | "getAddresses" | "getChainId" | "sendTransaction"
 >
