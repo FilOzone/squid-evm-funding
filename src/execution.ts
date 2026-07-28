@@ -162,7 +162,6 @@ function assertCheckpoint(
   const transactionHashes = new Set<string>()
   const approvalAttempts = new Map<string, Set<number>>()
   const resetAttempts = new Map<string, Set<number>>()
-  const routeRequirements = new Set<string>()
   for (const item of checkpoint.steps) {
     if (item == null || typeof item !== "object")
       throw new Error("Checkpoint has invalid execution steps")
@@ -247,8 +246,7 @@ function assertCheckpoint(
       throw new Error("Checkpoint has invalid execution steps")
     seen.add(itemKey)
     if (transactionHash != null) transactionHashes.add(transactionHash)
-    if (item.kind === "route") routeRequirements.add(item.requirementId)
-    else {
+    if (item.kind !== "route") {
       const attempts =
         item.kind === "approval" ? approvalAttempts : resetAttempts
       const values = attempts.get(item.requirementId) ?? new Set<number>()
@@ -266,21 +264,6 @@ function assertCheckpoint(
       if (!combined.has(attempt))
         throw new Error("Checkpoint has invalid execution steps")
     }
-    if (approvals.size > 0) {
-      const highestApproval = Math.max(...approvals)
-      for (let attempt = 0; attempt <= highestApproval; attempt += 1) {
-        if (!approvals.has(attempt))
-          throw new Error("Checkpoint has invalid execution steps")
-      }
-    }
-    if (
-      [...resets].some(
-        (attempt) =>
-          !approvals.has(attempt) &&
-          (attempt !== highest || routeRequirements.has(requirementId)),
-      )
-    )
-      throw new Error("Checkpoint has invalid execution steps")
   }
 }
 
@@ -607,7 +590,6 @@ export async function executeSquidFunding(
       if (nativeBalance < prepared.fee + (input.nativeBalanceFloor ?? 0n))
         throw new Error("Native balance would not cover the fee and floor")
     }
-    preSend?.()
     totalNativeFee += prepared.fee
     const intent: SquidExecutionStep = {
       kind,
@@ -631,11 +613,34 @@ export async function executeSquidFunding(
     }
     checkpoint = withStep(checkpoint, intent)
     await dependencies.save(checkpoint)
-    const transactionHash = (await dependencies.walletClient.sendTransaction({
+    const request = {
       account: configuredAccount ?? input.account,
       chain: undefined,
       ...prepared.request,
-    } as never)) as Hash
+    }
+    try {
+      if (
+        (await dependencies.walletClient.getChainId()) !==
+        input.source.chain.chainId
+      )
+        throw new Error("Wallet chain does not match the Squid source chain")
+      preSend?.()
+    } catch (error) {
+      checkpoint = {
+        ...checkpoint,
+        steps: checkpoint.steps.filter(
+          (step) =>
+            key(step.kind, step.requirementId, step.attempt) !==
+            key(intent.kind, intent.requirementId, intent.attempt),
+        ),
+      }
+      await dependencies.save(checkpoint)
+      throw error
+    }
+    const submission = dependencies.walletClient.sendTransaction(
+      request as never,
+    )
+    const transactionHash = (await submission) as Hash
     nextNonce += 1
     const sent = { ...intent, transactionHash }
     checkpoint = withStep(checkpoint, sent)

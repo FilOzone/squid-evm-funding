@@ -80,6 +80,7 @@ function clients(
   let destinationRead = 0
   let destinationNativeRead = 0
   let allowance = options.allowance ?? 0n
+  let walletChainId = options.walletChainId ?? 1
   const transactions = new Map<string, object>()
   const source = {
     getChainId: async () => 1,
@@ -127,7 +128,7 @@ function clients(
   } as unknown as SquidPublicClient
   const wallet = {
     account: options.walletAccount,
-    getChainId: async () => options.walletChainId ?? 1,
+    getChainId: async () => walletChainId,
     getAddresses: async () => {
       calls.getAddresses += 1
       if (options.getAddressesError != null) throw options.getAddressesError
@@ -160,6 +161,9 @@ function clients(
     calls,
     setAllowance: (next: bigint) => {
       allowance = next
+    },
+    setWalletChainId: (next: number) => {
+      walletChainId = next
     },
   }
 }
@@ -201,6 +205,52 @@ function dependencies(
     sleep: async () => {},
     saved: () => saved,
   }
+}
+
+async function resetOnlyRetryCheckpoint(mocked: ReturnType<typeof clients>) {
+  const initial = dependencies(mocked)
+  let refreshes = 0
+  initial.refreshQuote = async (planned) => {
+    refreshes += 1
+    return refreshes === 1
+      ? { ...planned, id: "before-approval" }
+      : { ...planned, target: spender }
+  }
+  await expect(executeSquidFunding(input(), initial)).rejects.toThrow(
+    "trust checks",
+  )
+  const approvalCheckpoint = initial.saved().at(-1)
+  expect(approvalCheckpoint).toBeDefined()
+  mocked.setAllowance(5n)
+
+  const estimateGas = mocked.source.estimateGas.bind(mocked.source)
+  const failAt = mocked.calls.estimateGas + 2
+  mocked.source.estimateGas = async (request) => {
+    const gas = await estimateGas(request)
+    if (mocked.calls.estimateGas === failAt)
+      throw new Error("simulated approval crash")
+    return gas
+  }
+  const interrupted = dependencies(
+    mocked,
+    approvalCheckpoint as SquidExecutionCheckpoint,
+  )
+  await expect(
+    executeSquidFunding({ ...input(), maxNativeFee: 40n }, interrupted),
+  ).rejects.toThrow("simulated approval crash")
+  mocked.source.estimateGas = estimateGas
+  const checkpoint = interrupted.saved().at(-1)
+  expect(checkpoint).toBeDefined()
+  expect(
+    (checkpoint as SquidExecutionCheckpoint).steps.map((step) => [
+      step.kind,
+      step.attempt,
+    ]),
+  ).toEqual([
+    ["approval", 0],
+    ["approval-reset", 1],
+  ])
+  return checkpoint as SquidExecutionCheckpoint
 }
 
 describe("bounded Squid execution", () => {
@@ -396,6 +446,96 @@ describe("bounded Squid execution", () => {
       ),
     ).rejects.toThrow("trust checks")
     expect(mocked.calls.send).toBe(1)
+  })
+
+  it("clears an unsent route intent when it expires during checkpoint save", async () => {
+    const planned = quote()
+    const mocked = clients({
+      allowance: 10n,
+      destinationBalances: [0n, 0n, 10n],
+    })
+    const deps = dependencies(mocked)
+    const save = deps.save
+    let clock = 0
+    deps.now = () => clock
+    deps.save = async (checkpoint) => {
+      await save(checkpoint)
+      if (
+        checkpoint.steps.some(
+          (step) => step.kind === "route" && step.transactionHash == null,
+        )
+      )
+        clock = planned.expiresAt * 1_000
+    }
+    await expect(executeSquidFunding(input([planned]), deps)).rejects.toThrow(
+      "trust checks",
+    )
+    expect(mocked.calls.send).toBe(0)
+    const resumable = deps.saved().at(-1)
+    expect(resumable?.steps).toEqual([])
+
+    await executeSquidFunding(input([planned]), dependencies(mocked, resumable))
+    expect(mocked.calls.send).toBe(1)
+  })
+
+  it("clears an unsent intent when the wallet switches chains during save", async () => {
+    const mocked = clients({
+      allowance: 10n,
+      destinationBalances: [0n, 0n, 10n],
+    })
+    const deps = dependencies(mocked)
+    const save = deps.save
+    deps.save = async (checkpoint) => {
+      await save(checkpoint)
+      if (
+        checkpoint.steps.some(
+          (step) => step.kind === "route" && step.transactionHash == null,
+        )
+      )
+        mocked.setWalletChainId(10)
+    }
+    await expect(executeSquidFunding(input(), deps)).rejects.toThrow(
+      "Wallet chain",
+    )
+    expect(mocked.calls.send).toBe(0)
+    const resumable = deps.saved().at(-1)
+    expect(resumable?.steps).toEqual([])
+
+    mocked.setWalletChainId(1)
+    await executeSquidFunding(input(), dependencies(mocked, resumable))
+    expect(mocked.calls.send).toBe(1)
+  })
+
+  it("rechecks the wallet chain before a later route broadcast", async () => {
+    const mocked = clients({ destinationBalances: [0n, 0n, 10n] })
+    const deps = dependencies(mocked)
+    const save = deps.save
+    deps.save = async (checkpoint) => {
+      await save(checkpoint)
+      if (
+        checkpoint.steps.some(
+          (step) => step.kind === "route" && step.transactionHash == null,
+        )
+      )
+        mocked.setWalletChainId(10)
+    }
+    await expect(executeSquidFunding(input(), deps)).rejects.toThrow(
+      "Wallet chain",
+    )
+    expect(mocked.calls.send).toBe(1)
+    const resumable = deps.saved().at(-1)
+    expect(resumable?.steps.some((step) => step.transactionHash == null)).toBe(
+      false,
+    )
+
+    mocked.setWalletChainId(1)
+    const completed = await executeSquidFunding(
+      input(),
+      dependencies(mocked, resumable),
+    )
+    expect(mocked.calls.send).toBe(2)
+    await executeSquidFunding(input(), dependencies(mocked, completed))
+    expect(mocked.calls.send).toBe(2)
   })
 
   it("never redirects approval to a provider-supplied spender", async () => {
@@ -612,6 +752,103 @@ describe("bounded Squid execution", () => {
     expect(
       completed.steps.reduce((total, step) => total + step.nativeFee, 0n),
     ).toBe(18n)
+    const sendsAfterCompletion = mocked.calls.send
+    await executeSquidFunding(input(), dependencies(mocked, completed))
+    expect(mocked.calls.send).toBe(sendsAfterCompletion)
+  })
+
+  it("preserves reset and approval history after a reduced allowance", async () => {
+    const mocked = clients({ destinationBalances: [0n, 0n, 10n] })
+    const initial = dependencies(mocked)
+    let refreshes = 0
+    initial.refreshQuote = async (planned) => {
+      refreshes += 1
+      return refreshes === 1
+        ? { ...planned, id: "before-approval" }
+        : { ...planned, target: spender }
+    }
+    await expect(executeSquidFunding(input(), initial)).rejects.toThrow(
+      "trust checks",
+    )
+    const approvalCheckpoint = initial.saved().at(-1)
+    expect(approvalCheckpoint).toBeDefined()
+    mocked.setAllowance(5n)
+
+    const completed = await executeSquidFunding(
+      { ...input(), maxNativeFee: 30n },
+      dependencies(mocked, approvalCheckpoint as SquidExecutionCheckpoint),
+    )
+    expect(completed.steps.map((step) => [step.kind, step.attempt])).toEqual([
+      ["approval", 0],
+      ["approval-reset", 1],
+      ["approval", 1],
+      ["route", 0],
+    ])
+    expect(
+      completed.steps.reduce((total, step) => total + step.nativeFee, 0n),
+    ).toBe(24n)
+    const sends = mocked.calls.send
+    await executeSquidFunding(
+      { ...input(), maxNativeFee: 30n },
+      dependencies(mocked, completed),
+    )
+    expect(mocked.calls.send).toBe(sends)
+  })
+
+  it("continues after a reset-only retry and another nonzero allowance", async () => {
+    const mocked = clients({
+      destinationBalances: [0n, 0n, 0n, 10n],
+    })
+    const resetOnly = await resetOnlyRetryCheckpoint(mocked)
+    mocked.setAllowance(5n)
+
+    const completed = await executeSquidFunding(
+      { ...input(), maxNativeFee: 40n },
+      dependencies(mocked, resetOnly),
+    )
+    expect(completed.steps.map((step) => [step.kind, step.attempt])).toEqual([
+      ["approval", 0],
+      ["approval-reset", 1],
+      ["approval-reset", 2],
+      ["approval", 2],
+      ["route", 0],
+    ])
+    expect(
+      completed.steps.reduce((total, step) => total + step.nativeFee, 0n),
+    ).toBe(30n)
+    const sends = mocked.calls.send
+    await executeSquidFunding(
+      { ...input(), maxNativeFee: 40n },
+      dependencies(mocked, completed),
+    )
+    expect(mocked.calls.send).toBe(sends)
+  })
+
+  it("continues when an exact allowance appears after a reset-only retry", async () => {
+    const mocked = clients({
+      destinationBalances: [0n, 0n, 0n, 10n],
+    })
+    const resetOnly = await resetOnlyRetryCheckpoint(mocked)
+    mocked.setAllowance(10n)
+
+    const completed = await executeSquidFunding(
+      { ...input(), maxNativeFee: 40n },
+      dependencies(mocked, resetOnly),
+    )
+    expect(completed.steps.map((step) => [step.kind, step.attempt])).toEqual([
+      ["approval", 0],
+      ["approval-reset", 1],
+      ["route", 0],
+    ])
+    expect(
+      completed.steps.reduce((total, step) => total + step.nativeFee, 0n),
+    ).toBe(18n)
+    const sends = mocked.calls.send
+    await executeSquidFunding(
+      { ...input(), maxNativeFee: 40n },
+      dependencies(mocked, completed),
+    )
+    expect(mocked.calls.send).toBe(sends)
   })
 
   it("verifies every resumed hash against its complete saved intent", async () => {

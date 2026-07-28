@@ -25,10 +25,12 @@ clients, and non-sensitive checkpoint load/save callbacks. Planning is
 read-only; execution asks the supplied wallet client to sign and send each
 approval and route transaction. The wallet must be on the source chain and
 control the requested account; a configured local viem account is passed
-through unchanged. Execution uses only the caller-approved route target and
-spender, persists intent before sending, and does not retry an intent that has
-no transaction hash. If an allowance changes after a successful approval, a
-new checkpointed attempt preserves the prior transaction and fee history.
+through unchanged. Immediately before each broadcast, execution rechecks the
+wallet chain and route expiry; a failed check clears the known-unsent intent.
+Execution uses only the caller-approved route target and spender, persists
+intent before sending, and does not retry an intent that has no transaction
+hash. If an allowance changes after a successful approval, a new checkpointed
+attempt preserves the prior transaction and fee history.
 Route completion is checked at most
 `maxPollAttempts` times, with `pollIntervalMs` between attempts. The package
 schedules no more than `(maxPollAttempts - 1) * pollIntervalMs` of polling
