@@ -158,7 +158,13 @@ function withStep(
 function assertCheckpoint(
   checkpoint: SquidExecutionCheckpoint,
   expectedId: string,
-  requirementAmounts: ReadonlyMap<string, bigint>,
+  context: {
+    account: Address
+    sourceToken: Address
+    sourceChainId: number
+    trustedTarget: Address
+    requirements: ReadonlyMap<string, { amount: bigint; chainId: number }>
+  },
   feeMode: "standard" | "op-stack",
 ) {
   if (
@@ -213,17 +219,22 @@ function assertCheckpoint(
       typeof item.transactionHash === "string"
         ? item.transactionHash.toLowerCase()
         : undefined
-    const requirementAmount = requirementAmounts.get(item.requirementId)
+    const requirement = context.requirements.get(item.requirementId)
     if (
       seen.has(itemKey) ||
       (transactionHash != null && transactionHashes.has(transactionHash)) ||
-      requirementAmount == null ||
+      requirement == null ||
       typeof item.nativeFee !== "bigint" ||
       item.nativeFee < 0n ||
       typeof item.from !== "string" ||
       !/^0x[0-9a-fA-F]{40}$/.test(item.from) ||
+      !sameAddress(item.from as Address, context.account) ||
       typeof item.to !== "string" ||
       !/^0x[0-9a-fA-F]{40}$/.test(item.to) ||
+      !sameAddress(
+        item.to as Address,
+        item.kind === "route" ? context.trustedTarget : context.sourceToken,
+      ) ||
       typeof item.dataHash !== "string" ||
       !/^0x[0-9a-fA-F]{64}$/.test(item.dataHash) ||
       typeof item.value !== "bigint" ||
@@ -248,15 +259,15 @@ function assertCheckpoint(
       (item.receiptStatus != null && item.transactionHash == null) ||
       (item.kind === "route" &&
         (typeof item.destinationMinimum !== "bigint" ||
-          item.destinationMinimum < requirementAmount ||
+          item.destinationMinimum < requirement.amount ||
           typeof item.quoteId !== "string" ||
           item.quoteId === "" ||
           (item.requestId != null &&
             (typeof item.requestId !== "string" || item.requestId === "")) ||
           !Number.isSafeInteger(item.fromChainId) ||
-          (item.fromChainId as number) <= 0 ||
+          item.fromChainId !== context.sourceChainId ||
           !Number.isSafeInteger(item.toChainId) ||
-          (item.toChainId as number) <= 0))
+          item.toChainId !== requirement.chainId))
     )
       throw new Error("Checkpoint has invalid execution steps")
     seen.add(itemKey)
@@ -269,7 +280,7 @@ function assertCheckpoint(
       attempts.set(item.requirementId, values)
     }
   }
-  for (const requirementId of requirementAmounts.keys()) {
+  for (const requirementId of context.requirements.keys()) {
     const approvals = approvalAttempts.get(requirementId) ?? new Set<number>()
     const resets = resetAttempts.get(requirementId) ?? new Set<number>()
     const combined = new Set([...approvals, ...resets])
@@ -476,12 +487,19 @@ export async function executeSquidFunding(
     input.pollIntervalMs > MAX_POLL_INTERVAL_MS
   )
     throw new Error("Execution limits and at least one quote are required")
-  const requirementAmounts = new Map(
+  const requirements = new Map(
     input.quotes.map(
-      (quote) => [quote.requirement.id, quote.requirement.amount] as const,
+      (quote) =>
+        [
+          quote.requirement.id,
+          {
+            amount: quote.requirement.amount,
+            chainId: quote.requirement.chainId,
+          },
+        ] as const,
     ),
   )
-  if (requirementAmounts.size !== input.quotes.length)
+  if (requirements.size !== input.quotes.length)
     throw new Error("Execution requirement IDs must be unique")
   const configuredStatus: unknown = dependencies.status
   const configuredStatusOptions: unknown = dependencies.squidStatusOptions
@@ -541,7 +559,18 @@ export async function executeSquidFunding(
     throw new Error("Execution would exceed the source-token cap")
   const id = executionId(input)
   let checkpoint = (await dependencies.load()) ?? { executionId: id, steps: [] }
-  assertCheckpoint(checkpoint, id, requirementAmounts, input.feeMode)
+  assertCheckpoint(
+    checkpoint,
+    id,
+    {
+      account: input.account,
+      sourceToken: input.source.token,
+      sourceChainId: input.source.chain.chainId,
+      trustedTarget: input.trustedTarget,
+      requirements,
+    },
+    input.feeMode,
+  )
   if (checkpoint.steps.some((item) => item.transactionHash == null))
     throw new Error(
       "Checkpoint intent has no transaction hash; reconcile manually before resuming",

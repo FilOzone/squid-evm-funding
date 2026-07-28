@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
   executeSquidFunding,
   type SquidExecutionCheckpoint,
+  type SquidExecutionStep,
   type SquidPublicClient,
   type SquidQuote,
   type SquidWalletClient,
@@ -66,6 +67,7 @@ function clients(
     estimateGas: number
     totalFee: number
     getAddresses: number
+    getTransaction: number
     sent: unknown[]
     totalFeeRequests: unknown[]
   } = {
@@ -74,6 +76,7 @@ function clients(
     estimateGas: 0,
     totalFee: 0,
     getAddresses: 0,
+    getTransaction: 0,
     sent: [],
     totalFeeRequests: [],
   }
@@ -86,8 +89,10 @@ function clients(
     getChainId: async () => 1,
     getBalance: async () => options.sourceNativeBalance ?? 1_000n,
     getTransactionCount: async () => 7 + calls.send,
-    getTransaction: async ({ hash: transactionHash }: { hash: string }) =>
-      transactions.get(transactionHash) ?? null,
+    getTransaction: async ({ hash: transactionHash }: { hash: string }) => {
+      calls.getTransaction += 1
+      return transactions.get(transactionHash) ?? null
+    },
     estimateGas: async () => {
       calls.estimateGas += 1
       return 2n
@@ -164,6 +169,14 @@ function clients(
     },
     setWalletChainId: (next: number) => {
       walletChainId = next
+    },
+    setTransactionFields: (
+      transactionHash: string,
+      fields: Record<string, unknown>,
+    ) => {
+      const transaction = transactions.get(transactionHash)
+      if (transaction == null) throw new Error("Missing mocked transaction")
+      transactions.set(transactionHash, { ...transaction, ...fields })
     },
   }
 }
@@ -1195,6 +1208,91 @@ describe("bounded Squid execution", () => {
     }
     expect(mocked.calls.status).toBe(statusCalls)
     expect(mocked.calls.send).toBe(sends)
+  })
+
+  it("rejects checkpoint steps that tamper with bound execution context", async () => {
+    const cases: Array<{
+      name: string
+      kind: SquidExecutionStep["kind"]
+      step: Partial<SquidExecutionStep>
+      transaction?: Record<string, unknown>
+      allowance?: bigint
+    }> = [
+      {
+        name: "route sender",
+        kind: "route",
+        step: { from: thirdParty },
+        transaction: { from: thirdParty },
+      },
+      {
+        name: "approval sender",
+        kind: "approval",
+        step: { from: thirdParty },
+        transaction: { from: thirdParty },
+      },
+      {
+        name: "approval-reset sender",
+        kind: "approval-reset",
+        step: { from: thirdParty },
+        transaction: { from: thirdParty },
+        allowance: 20n,
+      },
+      {
+        name: "route destination",
+        kind: "route",
+        step: { to: thirdParty },
+        transaction: { to: thirdParty },
+      },
+      {
+        name: "approval destination",
+        kind: "approval",
+        step: { to: thirdParty },
+        transaction: { to: thirdParty },
+      },
+      {
+        name: "approval-reset destination",
+        kind: "approval-reset",
+        step: { to: thirdParty },
+        transaction: { to: thirdParty },
+        allowance: 20n,
+      },
+      {
+        name: "source chain",
+        kind: "route",
+        step: { fromChainId: 2 },
+      },
+      {
+        name: "destination chain",
+        kind: "route",
+        step: { toChainId: 11 },
+      },
+    ]
+    for (const { name, kind, step, transaction, allowance } of cases) {
+      const mocked = allowance == null ? clients() : clients({ allowance })
+      const checkpoint = await executeSquidFunding(
+        input(),
+        dependencies(mocked),
+      )
+      const invalid = {
+        ...checkpoint,
+        steps: checkpoint.steps.map((item) =>
+          item.kind === kind ? { ...item, ...step } : item,
+        ),
+      } as SquidExecutionCheckpoint
+      const changed = invalid.steps.find((item) => item.kind === kind)
+      if (transaction != null && changed?.transactionHash != null)
+        mocked.setTransactionFields(changed.transactionHash, transaction)
+      const sends = mocked.calls.send
+      const statusCalls = mocked.calls.status
+      const transactionReads = mocked.calls.getTransaction
+      await expect(
+        executeSquidFunding(input(), dependencies(mocked, invalid)),
+        name,
+      ).rejects.toThrow("invalid execution steps")
+      expect(mocked.calls.getTransaction, name).toBe(transactionReads)
+      expect(mocked.calls.status, name).toBe(statusCalls)
+      expect(mocked.calls.send, name).toBe(sends)
+    }
   })
 
   it("binds requirement amounts and fee mode to the checkpoint identity", async () => {
