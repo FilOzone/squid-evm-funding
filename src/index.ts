@@ -3,6 +3,8 @@ export { executeSquidFunding } from "./execution.js"
 export { planSquidFunding } from "./planner.js"
 export {
   fetchSquidCatalog,
+  fetchSquidStatus,
+  parseSquidStatus,
   quoteSquidRoute,
   SquidMinimumAmountError,
 } from "./squid.js"

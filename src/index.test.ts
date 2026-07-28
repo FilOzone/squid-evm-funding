@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import {
   fetchSquidCatalog,
   parseSquidCatalog,
+  parseSquidStatus,
   planSquidFunding,
   quoteSquidRoute,
   resolveSourceToken,
@@ -163,6 +164,14 @@ describe("Squid catalog and planner", () => {
     await expect(
       fetchSquidCatalog({ integratorId: " ", fetch }),
     ).rejects.toThrow("integrator ID")
+  })
+
+  it("normalizes documented Squid route status values", () => {
+    expect(parseSquidStatus({ squidTransactionStatus: "SUCCESS" })).toBe(
+      "success",
+    )
+    expect(parseSquidStatus({ status: "ONGOING" })).toBe("pending")
+    expect(parseSquidStatus({ status: "REFUND" })).toBe("failed")
   })
 
   it("keeps an explicit provider approval spender for execution validation", async () => {

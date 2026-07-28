@@ -1,4 +1,4 @@
-import type { Address, Hex } from "viem"
+import type { Address, Hash, Hex } from "viem"
 import { parseSquidCatalog } from "./catalog.js"
 import type {
   DestinationRequirement,
@@ -29,6 +29,26 @@ type RouteWire = {
 }
 
 export class SquidMinimumAmountError extends Error {}
+
+export function parseSquidStatus(
+  value: unknown,
+): "pending" | "success" | "failed" {
+  const status =
+    value != null && typeof value === "object"
+      ? ((value as Record<string, unknown>).squidTransactionStatus ??
+        (value as Record<string, unknown>).status)
+      : undefined
+  if (typeof status !== "string")
+    throw new Error("Invalid Squid status response")
+  if (status.toLowerCase() === "success") return "success"
+  if (
+    ["failed", "refund", "needs_gas", "partial_success"].includes(
+      status.toLowerCase(),
+    )
+  )
+    return "failed"
+  return "pending"
+}
 
 function address(value: unknown, label: string): Address {
   if (typeof value !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(value))
@@ -255,4 +275,30 @@ export async function quoteSquidRoute(
         ? estimatedRouteDuration
         : 0,
   }
+}
+
+/** Fetch and normalize the documented Squid v2 route-status response. */
+export async function fetchSquidStatus(
+  input: { quote: SquidQuote; transactionHash: Hash },
+  options: SquidClientOptions,
+): Promise<"pending" | "success" | "failed"> {
+  const configured = client(options)
+  const query = new URLSearchParams({
+    transactionId: input.transactionHash,
+    fromChainId: String(input.quote.source.chain.chainId),
+    toChainId: String(input.quote.requirement.chainId),
+    quoteId: input.quote.id,
+    ...(input.quote.requestId == null
+      ? {}
+      : { requestId: input.quote.requestId }),
+  })
+  const response = await configured.fetch(
+    `${configured.baseUrl}/status?${query}`,
+    {
+      headers: { "x-integrator-id": options.integratorId },
+    },
+  )
+  if (!response.ok)
+    throw new Error(`Squid status request failed (${response.status})`)
+  return parseSquidStatus(await response.json())
 }

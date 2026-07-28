@@ -57,15 +57,17 @@ export interface SquidClientOptions {
 }
 
 export interface SquidExecutionStep {
-  kind: "approval" | "route"
+  kind: "approval" | "approval-reset" | "route"
   requirementId: string
   nativeFee: bigint
+  destinationMinimum?: bigint
   transactionHash?: Hash
   receiptStatus?: "success" | "reverted"
 }
 
 /** One non-sensitive checkpoint format. An intent without a hash is deliberately not resumable. */
 export interface SquidExecutionCheckpoint {
+  executionId: string
   steps: readonly SquidExecutionStep[]
 }
 

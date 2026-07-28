@@ -50,11 +50,19 @@ function clients(
     allowance?: bigint
     fee?: bigint
     destinationBalances?: bigint[]
+    destinationNativeBalances?: bigint[]
     totalFee?: bigint
   } = {},
 ) {
-  const calls = { send: 0, status: 0, estimateGas: 0, totalFee: 0 }
+  const calls: {
+    send: number
+    status: number
+    estimateGas: number
+    totalFee: number
+    sent: unknown[]
+  } = { send: 0, status: 0, estimateGas: 0, totalFee: 0, sent: [] }
   let destinationRead = 0
+  let destinationNativeRead = 0
   const source = {
     getChainId: async () => 1,
     getBalance: async () => 1_000n,
@@ -78,6 +86,13 @@ function clients(
   const destination = {
     ...source,
     getChainId: async () => 10,
+    getBalance: async () =>
+      (options.destinationNativeBalances ?? [0n, 10n])[
+        Math.min(
+          destinationNativeRead++,
+          (options.destinationNativeBalances ?? [0n, 10n]).length - 1,
+        )
+      ] as bigint,
     readContract: async () =>
       (options.destinationBalances ?? [0n, 10n])[
         Math.min(
@@ -88,8 +103,9 @@ function clients(
   } as unknown as SquidPublicClient
   const wallet = {
     getAddresses: async () => [account],
-    sendTransaction: async () => {
+    sendTransaction: async (request: unknown) => {
       calls.send += 1
+      calls.sent.push(request)
       return hash
     },
   } as unknown as SquidWalletClient
@@ -147,21 +163,20 @@ describe("bounded Squid execution", () => {
 
   it("stops for manual reconciliation when an intent has no hash", async () => {
     const mocked = clients()
+    const initial = await executeSquidFunding(input(), dependencies(mocked))
+    const sends = mocked.calls.send
     const deps = dependencies(mocked, {
-      steps: [
-        {
-          kind: "approval",
-          requirementId: "fund",
-          nativeFee: 6n,
-          receiptStatus: "success",
-        },
-        { kind: "route", requirementId: "fund", nativeFee: 6n },
-      ],
+      ...initial,
+      steps: initial.steps.map((step) =>
+        step.kind === "route"
+          ? { ...step, transactionHash: undefined, receiptStatus: undefined }
+          : step,
+      ),
     })
     await expect(executeSquidFunding(input(), deps)).rejects.toThrow(
       "reconcile manually",
     )
-    expect(mocked.calls.send).toBe(0)
+    expect(mocked.calls.send).toBe(sends)
   })
 
   it("accounts for approval and route fees under one native cap", async () => {
@@ -174,22 +189,58 @@ describe("bounded Squid execution", () => {
     expect(mocked.calls.estimateGas).toBe(2)
   })
 
+  it("uses getBalance for a native destination arrival", async () => {
+    const mocked = clients({ destinationNativeBalances: [0n, 10n] })
+    await executeSquidFunding(
+      input([
+        quote({
+          requirement: {
+            id: "fund",
+            chainId: 10,
+            token: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            amount: 10n,
+            recipient: account,
+          },
+        }),
+      ]),
+      dependencies(mocked),
+    )
+    expect(mocked.calls.send).toBe(2)
+  })
+
+  it("resets an overbroad allowance and sends fee-bounded transactions", async () => {
+    const mocked = clients({ allowance: 20n })
+    await executeSquidFunding(input(), dependencies(mocked))
+    expect(mocked.calls.send).toBe(3)
+    expect(mocked.calls.sent).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ gas: 2n, maxFeePerGas: 3n }),
+      ]),
+    )
+  })
+
+  it("rejects an ERC-20 route that carries native value", async () => {
+    const mocked = clients()
+    await expect(
+      executeSquidFunding(input([quote({ value: 1n })]), dependencies(mocked)),
+    ).rejects.toThrow("trust checks")
+    expect(mocked.calls.send).toBe(0)
+  })
+
   it("counts known checkpoint fee commitments before sending again", async () => {
     const mocked = clients({ fee: 3n })
+    const initial = await executeSquidFunding(input(), dependencies(mocked))
+    const sends = mocked.calls.send
     const checkpoint: SquidExecutionCheckpoint = {
-      steps: [
-        {
-          kind: "approval",
-          requirementId: "fund",
-          nativeFee: 20n,
-          receiptStatus: "success",
-        },
-      ],
+      ...initial,
+      steps: initial.steps
+        .filter((step) => step.kind === "approval")
+        .map((step) => ({ ...step, nativeFee: 20n })),
     }
     await expect(
       executeSquidFunding(input(), dependencies(mocked, checkpoint)),
     ).rejects.toThrow("total-native-fee cap")
-    expect(mocked.calls.send).toBe(0)
+    expect(mocked.calls.send).toBe(sends)
   })
 
   it("uses OP Stack total fees and fails closed without them", async () => {
@@ -206,7 +257,7 @@ describe("bounded Squid execution", () => {
       dependencies(total),
     )
     expect(total.calls.totalFee).toBe(2)
-    expect(total.calls.estimateGas).toBe(0)
+    expect(total.calls.estimateGas).toBe(2)
   })
 
   it("rejects a refreshed route that changes its trusted target", async () => {
@@ -234,24 +285,10 @@ describe("bounded Squid execution", () => {
 
   it("resumes known transactions without resubmitting them", async () => {
     const mocked = clients()
-    const checkpoint: SquidExecutionCheckpoint = {
-      steps: [
-        {
-          kind: "approval",
-          requirementId: "fund",
-          nativeFee: 6n,
-          transactionHash: hash,
-        },
-        {
-          kind: "route",
-          requirementId: "fund",
-          nativeFee: 6n,
-          transactionHash: hash,
-        },
-      ],
-    }
+    const checkpoint = await executeSquidFunding(input(), dependencies(mocked))
+    const sends = mocked.calls.send
     await executeSquidFunding(input(), dependencies(mocked, checkpoint))
-    expect(mocked.calls.send).toBe(0)
-    expect(mocked.calls.status).toBe(1)
+    expect(mocked.calls.send).toBe(sends)
+    expect(mocked.calls.status).toBe(2)
   })
 })
