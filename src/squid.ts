@@ -5,6 +5,7 @@ import type {
   SourceToken,
   SquidClientOptions,
   SquidQuote,
+  SquidStatusReference,
 } from "./types.js"
 
 const DEFAULT_BASE_URL = "https://v2.api.squidrouter.com/v2"
@@ -279,18 +280,18 @@ export async function quoteSquidRoute(
 
 /** Fetch and normalize the documented Squid v2 route-status response. */
 export async function fetchSquidStatus(
-  input: { quote: SquidQuote; transactionHash: Hash },
+  input: { status: SquidStatusReference; transactionHash: Hash },
   options: SquidClientOptions,
 ): Promise<"pending" | "success" | "failed"> {
   const configured = client(options)
   const query = new URLSearchParams({
     transactionId: input.transactionHash,
-    fromChainId: String(input.quote.source.chain.chainId),
-    toChainId: String(input.quote.requirement.chainId),
-    quoteId: input.quote.id,
-    ...(input.quote.requestId == null
+    fromChainId: String(input.status.fromChainId),
+    toChainId: String(input.status.toChainId),
+    quoteId: input.status.quoteId,
+    ...(input.status.requestId == null
       ? {}
-      : { requestId: input.quote.requestId }),
+      : { requestId: input.status.requestId }),
   })
   const response = await configured.fetch(
     `${configured.baseUrl}/status?${query}`,

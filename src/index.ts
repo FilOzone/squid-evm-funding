@@ -18,6 +18,7 @@ export type {
   SquidExecutionStep,
   SquidPublicClient,
   SquidQuote,
+  SquidStatusReference,
   SquidWalletClient,
 } from "./types.js"
 export { NATIVE_TOKEN_ADDRESS } from "./types.js"

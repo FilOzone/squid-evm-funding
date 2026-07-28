@@ -12,6 +12,7 @@ import type {
   SquidExecutionStep,
   SquidPublicClient,
   SquidQuote,
+  SquidStatusReference,
   SquidWalletClient,
 } from "./types.js"
 import { NATIVE_TOKEN_ADDRESS } from "./types.js"
@@ -45,22 +46,24 @@ function executionId(input: {
   trustedTarget: Address
   trustedSpender: Address
 }) {
-  return [
-    input.account.toLowerCase(),
-    input.source.chain.chainId,
-    input.source.token.toLowerCase(),
-    input.trustedTarget.toLowerCase(),
-    input.trustedSpender.toLowerCase(),
-    ...input.quotes.map((quote) =>
-      [
-        quote.requirement.id,
-        quote.sourceAmount,
-        quote.requirement.chainId,
-        quote.requirement.token.toLowerCase(),
-        quote.requirement.recipient.toLowerCase(),
-      ].join(":"),
-    ),
-  ].join("|")
+  return JSON.stringify({
+    account: input.account.toLowerCase(),
+    source: [
+      input.source.chain.chainId,
+      input.source.token.toLowerCase(),
+      input.source.native,
+    ],
+    target: input.trustedTarget.toLowerCase(),
+    spender: input.trustedSpender.toLowerCase(),
+    quotes: input.quotes.map((quote) => [
+      quote.requirement.id,
+      quote.sourceAmount.toString(),
+      quote.requirement.amount.toString(),
+      quote.requirement.chainId,
+      quote.requirement.token.toLowerCase(),
+      quote.requirement.recipient.toLowerCase(),
+    ]),
+  })
 }
 
 function current(
@@ -105,10 +108,21 @@ function assertCheckpoint(
       !requirementIds.has(item.requirementId) ||
       typeof item.nativeFee !== "bigint" ||
       item.nativeFee < 0n ||
+      !["approval", "approval-reset", "route"].includes(item.kind) ||
+      !Number.isSafeInteger(item.nonce) ||
+      (item.transactionHash != null &&
+        !/^0x[0-9a-fA-F]{64}$/.test(item.transactionHash)) ||
+      (item.receiptStatus != null &&
+        item.receiptStatus !== "success" &&
+        item.receiptStatus !== "reverted") ||
       (item.receiptStatus != null && item.transactionHash == null) ||
       (item.kind === "route" &&
         (typeof item.destinationMinimum !== "bigint" ||
-          item.destinationMinimum < 0n)) ||
+          item.destinationMinimum < 0n ||
+          typeof item.quoteId !== "string" ||
+          item.quoteId === "" ||
+          !Number.isSafeInteger(item.fromChainId) ||
+          !Number.isSafeInteger(item.toChainId))) ||
       (item.kind !== "route" && item.destinationMinimum != null)
     )
       throw new Error("Checkpoint has invalid execution steps")
@@ -129,11 +143,15 @@ function assertQuote(
     refreshed.source.chain.chainId !== planned.source.chain.chainId ||
     !sameAddress(refreshed.source.token, planned.source.token) ||
     refreshed.sourceAmount !== planned.sourceAmount ||
+    refreshed.source.native !== planned.source.native ||
     refreshed.requirement.chainId !== planned.requirement.chainId ||
     !sameAddress(refreshed.requirement.token, planned.requirement.token) ||
     !sameAddress(refreshed.requirement.recipient, account) ||
     refreshed.destinationAmount < planned.requirement.amount ||
     !sameAddress(refreshed.target, target) ||
+    (planned.approvalSpender != null &&
+      (refreshed.approvalSpender == null ||
+        !sameAddress(refreshed.approvalSpender, planned.approvalSpender))) ||
     (refreshed.approvalSpender != null &&
       !sameAddress(refreshed.approvalSpender, spender)) ||
     !/^0x(?:[0-9a-fA-F]{2})+$/.test(refreshed.data) ||
@@ -162,7 +180,7 @@ async function prepare(
   client: SquidPublicClient,
   transaction: Transaction,
   account: Address,
-  opStack: boolean,
+  feeMode: "standard" | "op-stack",
   buffer: ((totalFee: bigint) => bigint) | undefined,
 ) {
   const base = {
@@ -180,7 +198,7 @@ async function prepare(
   const feeFields =
     fees.maxFeePerGas == null ? { gasPrice: perGas } : { maxFeePerGas: perGas }
   const request = { ...base, gas, ...feeFields }
-  if (!opStack) return { fee: gas * perGas, request }
+  if (feeMode === "standard") return { fee: gas * perGas, request }
   if (client.estimateTotalFee == null || buffer == null)
     throw new Error("OP Stack total-fee accounting and buffer are required")
   const total = await client.estimateTotalFee({ account, ...base })
@@ -201,7 +219,7 @@ export async function executeSquidFunding(
     nativeBalanceFloor?: bigint
     trustedTarget: Address
     trustedSpender: Address
-    opStack?: boolean
+    feeMode: "standard" | "op-stack"
     opStackFeeBuffer?: (totalFee: bigint) => bigint
     maxPollAttempts: number
   },
@@ -211,7 +229,7 @@ export async function executeSquidFunding(
     destinationClient: (chainId: number) => SquidPublicClient
     refreshQuote: (quote: SquidQuote) => Promise<SquidQuote>
     status?: (
-      quote: SquidQuote,
+      status: SquidStatusReference,
       transactionHash: Hash,
     ) => Promise<"pending" | "success" | "failed">
     squidStatusOptions?: SquidClientOptions
@@ -224,6 +242,7 @@ export async function executeSquidFunding(
     input.quotes.length === 0 ||
     input.maxSourceAmount <= 0n ||
     input.maxNativeFee < 0n ||
+    (input.feeMode !== "standard" && input.feeMode !== "op-stack") ||
     !Number.isSafeInteger(input.maxPollAttempts) ||
     input.maxPollAttempts <= 0
   )
@@ -287,6 +306,7 @@ export async function executeSquidFunding(
   if (sourceBalance < unsentSource + (input.sourceBalanceFloor ?? 0n))
     throw new Error("Source-token balance would cross its required floor")
   let nextNonce = nonce
+  let newNativeFee = 0n
   let routeNativeValue = 0n
   const now = Math.floor((dependencies.now ?? Date.now)() / 1000)
 
@@ -295,6 +315,7 @@ export async function executeSquidFunding(
     requirementId: string,
     transaction: Transaction,
     destinationMinimum?: bigint,
+    statusReference?: SquidStatusReference,
   ) => {
     const known = current(checkpoint, kind, requirementId)
     if (known?.receiptStatus === "success") return known
@@ -315,16 +336,17 @@ export async function executeSquidFunding(
       dependencies.publicClient,
       { ...transaction, nonce: nextNonce },
       input.account,
-      input.opStack === true,
+      input.feeMode,
       input.opStackFeeBuffer,
     )
     if (totalNativeFee + prepared.fee > input.maxNativeFee)
       throw new Error("Execution would exceed the total-native-fee cap")
     totalNativeFee += prepared.fee
-    const nativeUse = input.source.native ? sourceAmount : routeNativeValue
+    newNativeFee += prepared.fee
+    const nativeUse = input.source.native ? unsentSource : routeNativeValue
     if (
       nativeBalance <
-      (input.nativeBalanceFloor ?? 0n) + nativeUse + totalNativeFee
+      (input.nativeBalanceFloor ?? 0n) + nativeUse + newNativeFee
     )
       throw new Error(
         "Native balance would not cover the source amount and fees",
@@ -333,7 +355,9 @@ export async function executeSquidFunding(
       kind,
       requirementId,
       nativeFee: prepared.fee,
+      nonce: prepared.request.nonce,
       ...(destinationMinimum == null ? {} : { destinationMinimum }),
+      ...(statusReference == null ? {} : statusReference),
     }
     checkpoint = withStep(checkpoint, intent)
     await dependencies.save(checkpoint)
@@ -360,7 +384,7 @@ export async function executeSquidFunding(
 
   for (const planned of input.quotes) {
     const route = current(checkpoint, "route", planned.requirement.id)
-    const refreshed =
+    let refreshed =
       route == null ? await dependencies.refreshQuote(planned) : planned
     if (route == null)
       assertQuote(
@@ -384,12 +408,15 @@ export async function executeSquidFunding(
         planned.requirement.recipient,
       )) + planned.requirement.amount
     if (!input.source.native && route == null) {
-      const allowance = await dependencies.publicClient.readContract({
+      let allowance = await dependencies.publicClient.readContract({
         address: input.source.token,
         abi: erc20Abi,
         functionName: "allowance",
         args: [input.account, input.trustedSpender],
       })
+      let approvalChanged =
+        current(checkpoint, "approval-reset", planned.requirement.id) != null ||
+        current(checkpoint, "approval", planned.requirement.id) != null
       if (allowance !== refreshed.sourceAmount && allowance > 0n)
         await run("approval-reset", planned.requirement.id, {
           to: input.source.token,
@@ -401,6 +428,7 @@ export async function executeSquidFunding(
           value: 0n,
           nonce: 0,
         })
+      if (allowance !== refreshed.sourceAmount) approvalChanged = true
       if (allowance !== refreshed.sourceAmount)
         await run("approval", planned.requirement.id, {
           to: input.source.token,
@@ -412,6 +440,27 @@ export async function executeSquidFunding(
           value: 0n,
           nonce: 0,
         })
+      if (approvalChanged) {
+        refreshed = await dependencies.refreshQuote(planned)
+        assertQuote(
+          planned,
+          refreshed,
+          input.account,
+          input.trustedTarget,
+          input.trustedSpender,
+          Math.floor((dependencies.now ?? Date.now)() / 1000),
+        )
+        allowance = await dependencies.publicClient.readContract({
+          address: input.source.token,
+          abi: erc20Abi,
+          functionName: "allowance",
+          args: [input.account, input.trustedSpender],
+        })
+        if (allowance !== refreshed.sourceAmount)
+          throw new Error(
+            "Exact source-token allowance is required after approval",
+          )
+      }
     }
     if (route == null) routeNativeValue += refreshed.value
     const completed = await run(
@@ -424,10 +473,34 @@ export async function executeSquidFunding(
         nonce: 0,
       },
       before,
+      route == null
+        ? {
+            quoteId: refreshed.id,
+            ...(refreshed.requestId == null
+              ? {}
+              : { requestId: refreshed.requestId }),
+            fromChainId: refreshed.source.chain.chainId,
+            toChainId: refreshed.requirement.chainId,
+          }
+        : undefined,
     )
     const hash = completed.transactionHash
-    if (hash == null || completed.destinationMinimum == null)
+    if (
+      hash == null ||
+      completed.destinationMinimum == null ||
+      completed.quoteId == null ||
+      completed.fromChainId == null ||
+      completed.toChainId == null
+    )
       throw new Error("Checkpoint route is incomplete")
+    const statusReference: SquidStatusReference = {
+      quoteId: completed.quoteId,
+      ...(completed.requestId == null
+        ? {}
+        : { requestId: completed.requestId }),
+      fromChainId: completed.fromChainId,
+      toChainId: completed.toChainId,
+    }
     let done = false
     for (let attempt = 0; attempt < input.maxPollAttempts; attempt += 1) {
       const status =
@@ -439,10 +512,10 @@ export async function executeSquidFunding(
                 )
               })()
             : await fetchSquidStatus(
-                { quote: planned, transactionHash: hash },
+                { status: statusReference, transactionHash: hash },
                 dependencies.squidStatusOptions,
               )
-          : await dependencies.status(planned, hash)
+          : await dependencies.status(statusReference, hash)
       const after = await balance(
         destinationClient,
         planned.requirement.token,

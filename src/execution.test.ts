@@ -1,3 +1,4 @@
+import { decodeFunctionData, erc20Abi } from "viem"
 import { describe, expect, it } from "vitest"
 import {
   executeSquidFunding,
@@ -52,6 +53,7 @@ function clients(
     destinationBalances?: bigint[]
     destinationNativeBalances?: bigint[]
     totalFee?: bigint
+    sourceNativeBalance?: bigint
   } = {},
 ) {
   const calls: {
@@ -63,9 +65,10 @@ function clients(
   } = { send: 0, status: 0, estimateGas: 0, totalFee: 0, sent: [] }
   let destinationRead = 0
   let destinationNativeRead = 0
+  let allowance = options.allowance ?? 0n
   const source = {
     getChainId: async () => 1,
-    getBalance: async () => 1_000n,
+    getBalance: async () => options.sourceNativeBalance ?? 1_000n,
     getTransactionCount: async () => 7,
     estimateGas: async () => {
       calls.estimateGas += 1
@@ -80,7 +83,7 @@ function clients(
             return options.totalFee as bigint
           },
     readContract: async (request: { functionName: string }) =>
-      request.functionName === "allowance" ? (options.allowance ?? 0n) : 100n,
+      request.functionName === "allowance" ? allowance : 100n,
     waitForTransactionReceipt: async () => ({ status: "success" }),
   } as unknown as SquidPublicClient
   const destination = {
@@ -106,6 +109,14 @@ function clients(
     sendTransaction: async (request: unknown) => {
       calls.send += 1
       calls.sent.push(request)
+      const transaction = request as { data?: `0x${string}`; to?: string }
+      if (transaction.data != null && transaction.to === sourceToken) {
+        const decoded = decodeFunctionData({
+          abi: erc20Abi,
+          data: transaction.data,
+        })
+        if (decoded.functionName === "approve") allowance = decoded.args[1]
+      }
       return hash
     },
   } as unknown as SquidWalletClient
@@ -121,6 +132,7 @@ function input(quotes: readonly SquidQuote[] = [quote()]) {
     maxNativeFee: 20n,
     trustedTarget: target,
     trustedSpender: spender,
+    feeMode: "standard" as const,
     maxPollAttempts: 2,
   }
 }
@@ -247,13 +259,13 @@ describe("bounded Squid execution", () => {
     const noTotal = clients()
     await expect(
       executeSquidFunding(
-        { ...input(), opStack: true, opStackFeeBuffer: (fee) => fee },
+        { ...input(), feeMode: "op-stack", opStackFeeBuffer: (fee) => fee },
         dependencies(noTotal),
       ),
     ).rejects.toThrow("OP Stack total-fee")
     const total = clients({ totalFee: 4n })
     await executeSquidFunding(
-      { ...input(), opStack: true, opStackFeeBuffer: (fee) => fee + 1n },
+      { ...input(), feeMode: "op-stack", opStackFeeBuffer: (fee) => fee + 1n },
       dependencies(total),
     )
     expect(total.calls.totalFee).toBe(2)
@@ -281,6 +293,100 @@ describe("bounded Squid execution", () => {
       "trust checks",
     )
     expect(mocked.calls.send).toBe(0)
+  })
+
+  it("records and polls the refreshed route identity", async () => {
+    const mocked = clients({ allowance: 10n })
+    const deps = dependencies(mocked)
+    let refreshes = 0
+    let statusReference: unknown
+    deps.refreshQuote = async (planned) => {
+      refreshes += 1
+      return { ...planned, id: "sent-quote", requestId: "sent-request" }
+    }
+    deps.status = async (status) => {
+      statusReference = status
+      return "success"
+    }
+    const checkpoint = await executeSquidFunding(input(), deps)
+    expect(refreshes).toBe(1)
+    expect(statusReference).toEqual({
+      quoteId: "sent-quote",
+      requestId: "sent-request",
+      fromChainId: 1,
+      toChainId: 10,
+    })
+    await executeSquidFunding(input(), dependencies(mocked, checkpoint))
+    expect(refreshes).toBe(1)
+  })
+
+  it("re-quotes and rejects a changed target after approval", async () => {
+    const mocked = clients()
+    const deps = dependencies(mocked)
+    let refreshes = 0
+    deps.refreshQuote = async (planned) => {
+      refreshes += 1
+      return refreshes === 1
+        ? { ...planned, id: "first" }
+        : { ...planned, target: spender }
+    }
+    await expect(executeSquidFunding(input(), deps)).rejects.toThrow(
+      "trust checks",
+    )
+    expect(mocked.calls.send).toBe(1)
+  })
+
+  it("requires the exact allowance after approval", async () => {
+    const mocked = clients()
+    const original = mocked.source.readContract.bind(mocked.source)
+    let allowanceReads = 0
+    mocked.source.readContract = async (request: { functionName: string }) => {
+      if (request.functionName === "allowance") {
+        allowanceReads += 1
+        if (allowanceReads > 1) return 0n
+      }
+      return original(request as never)
+    }
+    await expect(
+      executeSquidFunding(input(), dependencies(mocked)),
+    ).rejects.toThrow("Exact source-token allowance")
+    expect(mocked.calls.send).toBe(1)
+  })
+
+  it("reserves only unsent native routes when resuming", async () => {
+    const nativeSource = {
+      chain: { chainId: 1, networkName: "Ethereum" },
+      token: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" as const,
+      symbol: "ETH",
+      decimals: 18,
+      native: true,
+    }
+    const planned = quote({ source: nativeSource, value: 10n })
+    const second = quote({
+      source: nativeSource,
+      value: 10n,
+      requirement: { ...planned.requirement, id: "fund-2" },
+    })
+    const firstMocked = clients({ destinationBalances: [0n, 10n, 10n, 20n] })
+    const first = await executeSquidFunding(
+      { ...input([planned, second]), maxSourceAmount: 20n },
+      dependencies(firstMocked),
+    )
+    const checkpoint = {
+      ...first,
+      steps: first.steps.filter(
+        (step) => !(step.kind === "route" && step.requirementId === "fund-2"),
+      ),
+    }
+    const resumed = clients({
+      sourceNativeBalance: 16n,
+      destinationBalances: [10n, 10n, 10n, 20n],
+    })
+    await executeSquidFunding(
+      { ...input([planned, second]), maxSourceAmount: 20n },
+      dependencies(resumed, checkpoint),
+    )
+    expect(resumed.calls.send).toBe(1)
   })
 
   it("resumes known transactions without resubmitting them", async () => {
