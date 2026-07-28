@@ -25,7 +25,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "test": "vitest run",
-    "pack:check": "pnpm run build && node scripts/pack-check.mjs"
+    "prepack": "pnpm run build",
+    "pack:check": "node scripts/pack-check.mjs"
   },
   "dependencies": {
     "viem": "^2.48.3"

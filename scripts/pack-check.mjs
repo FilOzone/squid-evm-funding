@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process"
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { basename, isAbsolute, join } from "node:path"
+import { basename, join } from "node:path"
 
 function pnpm(args, options = {}) {
   const executable = process.env.npm_execpath
@@ -35,29 +35,28 @@ const expectedFiles = [
   "package.json",
 ].sort()
 
-function packEntryPath(entry) {
-  const path = typeof entry === "string" ? entry : entry?.path
-  if (typeof path !== "string" || path === "")
-    throw new Error("pnpm pack did not return a valid file list")
-  return path.replaceAll("\\", "/")
+async function listFiles(directory, prefix = "") {
+  const files = []
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const relativePath = prefix === "" ? entry.name : `${prefix}/${entry.name}`
+    if (entry.isDirectory())
+      files.push(
+        ...(await listFiles(join(directory, entry.name), relativePath)),
+      )
+    else files.push(relativePath)
+  }
+  return files
 }
 
 try {
   await Promise.all([mkdir(packDirectory), mkdir(consumerDirectory)])
-  const packResult = JSON.parse(
-    pnpm(["pack", "--json", "--pack-destination", packDirectory], {
-      encoding: "utf8",
-    }),
+  pnpm(["pack", "--pack-destination", packDirectory], { stdio: "inherit" })
+  const archives = (await readdir(packDirectory)).filter((file) =>
+    file.endsWith(".tgz"),
   )
-  const packed = Array.isArray(packResult) ? packResult[0] : packResult
-  if (packed == null || typeof packed !== "object")
-    throw new Error("pnpm pack did not return package metadata")
-  const filename = packed.filename ?? packed.tarball
-  if (typeof filename !== "string" || filename === "")
-    throw new Error("pnpm pack did not return a tarball path")
-  const archive = isAbsolute(filename)
-    ? filename
-    : join(packDirectory, filename)
+  if (archives.length !== 1)
+    throw new Error(`expected one packed archive, found ${archives.length}`)
+  const archive = join(packDirectory, archives[0])
   await writeFile(
     join(consumerDirectory, "package.json"),
     JSON.stringify({ private: true, type: "module" }),
@@ -80,10 +79,12 @@ try {
     ],
     { cwd: consumerDirectory, stdio: "inherit" },
   )
-  const fileEntries = packed.files ?? packed.contents
-  if (!Array.isArray(fileEntries))
-    throw new Error("pnpm pack did not return a file list")
-  const packedFiles = fileEntries.map(packEntryPath).sort()
+  const installedPackage = join(
+    consumerDirectory,
+    "node_modules",
+    "squid-evm-funding",
+  )
+  const packedFiles = (await listFiles(installedPackage)).sort()
   if (JSON.stringify(packedFiles) !== JSON.stringify(expectedFiles))
     throw new Error(`unexpected packed files: ${packedFiles.join(", ")}`)
   const archiveSize = (await stat(archive)).size
