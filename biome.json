@@ -2,7 +2,13 @@
   "$schema": "https://biomejs.dev/schemas/2.5.6/schema.json",
   "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2 },
   "files": {
-    "includes": ["src/**", "package.json", "tsconfig.json", "biome.json"]
+    "includes": [
+      "src/**",
+      "scripts/**",
+      "package.json",
+      "tsconfig.json",
+      "biome.json"
+    ]
   },
   "linter": { "enabled": true },
   "javascript": { "formatter": { "semicolons": "asNeeded" } }
