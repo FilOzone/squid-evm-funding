@@ -294,6 +294,38 @@ describe("bounded Squid execution", () => {
     expect(mocked.calls.estimateGas).toBe(2)
   })
 
+  it("uses the larger of local and quoted route gas", async () => {
+    const quotedHigher = clients({ allowance: 10n })
+    const quotedCheckpoint = await executeSquidFunding(
+      input([quote({ gasLimit: 5n })]),
+      dependencies(quotedHigher),
+    )
+    expect(quotedHigher.calls.sent[0]).toEqual(
+      expect.objectContaining({ gas: 5n }),
+    )
+    expect(
+      quotedCheckpoint.steps.find((step) => step.kind === "route"),
+    ).toEqual(expect.objectContaining({ gas: 5n, nativeFee: 15n }))
+
+    const capped = clients({ allowance: 10n })
+    await expect(
+      executeSquidFunding(
+        { ...input([quote({ gasLimit: 5n })]), maxNativeFee: 14n },
+        dependencies(capped),
+      ),
+    ).rejects.toThrow("total-native-fee cap")
+    expect(capped.calls.send).toBe(0)
+
+    const localHigher = clients({ allowance: 10n })
+    const localCheckpoint = await executeSquidFunding(
+      input(),
+      dependencies(localHigher),
+    )
+    expect(localCheckpoint.steps.find((step) => step.kind === "route")).toEqual(
+      expect.objectContaining({ gas: 2n, nativeFee: 6n }),
+    )
+  })
+
   it("uses getBalance for a native destination arrival", async () => {
     const mocked = clients({ destinationNativeBalances: [0n, 10n] })
     await executeSquidFunding(
@@ -424,6 +456,33 @@ describe("bounded Squid execution", () => {
     expect(mocked.calls.send).toBe(0)
   })
 
+  it("rejects malformed refreshed route metadata before broadcast", async () => {
+    const cases: Array<[string, Partial<SquidQuote>]> = [
+      ["undefined expiry", { expiresAt: undefined as unknown as number }],
+      ["NaN expiry", { expiresAt: Number.NaN }],
+      ["unsafe expiry", { expiresAt: Number.MAX_SAFE_INTEGER + 1 }],
+      ["zero gas", { gasLimit: 0n }],
+      ["negative gas", { gasLimit: -1n }],
+      ["non-bigint gas", { gasLimit: 1 as unknown as bigint }],
+      [
+        "non-bigint destination",
+        { destinationAmount: undefined as unknown as bigint },
+      ],
+      ["insufficient destination", { destinationAmount: 9n }],
+      ["blank quote ID", { id: " " }],
+      ["blank request ID", { requestId: " " }],
+    ]
+    for (const [name, overrides] of cases) {
+      const mocked = clients({ allowance: 10n })
+      const deps = dependencies(mocked)
+      deps.refreshQuote = async (planned) => ({ ...planned, ...overrides })
+      await expect(executeSquidFunding(input(), deps), name).rejects.toThrow(
+        "trust checks",
+      )
+      expect(mocked.calls.send, name).toBe(0)
+    }
+  })
+
   it("rechecks each quote expiry at its actual send boundary", async () => {
     const first = quote()
     const second = quote({
@@ -536,6 +595,41 @@ describe("bounded Squid execution", () => {
     expect(mocked.calls.send).toBe(2)
     await executeSquidFunding(input(), dependencies(mocked, completed))
     expect(mocked.calls.send).toBe(2)
+  })
+
+  it("clears an unsent intent when the pending nonce changes during save", async () => {
+    const mocked = clients({
+      allowance: 10n,
+      destinationBalances: [0n, 0n, 10n],
+    })
+    let pendingNonce = 7
+    mocked.source.getTransactionCount = async () => pendingNonce
+    const deps = dependencies(mocked)
+    const save = deps.save
+    deps.save = async (checkpoint) => {
+      await save(checkpoint)
+      if (
+        checkpoint.steps.some(
+          (step) => step.kind === "route" && step.transactionHash == null,
+        )
+      )
+        pendingNonce = 8
+    }
+    await expect(executeSquidFunding(input(), deps)).rejects.toThrow(
+      "Pending nonce changed",
+    )
+    expect(mocked.calls.send).toBe(0)
+    const resumable = deps.saved().at(-1)
+    expect(resumable?.steps).toEqual([])
+
+    const completed = await executeSquidFunding(
+      input(),
+      dependencies(mocked, resumable),
+    )
+    expect(mocked.calls.send).toBe(1)
+    expect(completed.steps.find((step) => step.kind === "route")).toEqual(
+      expect.objectContaining({ nonce: 8 }),
+    )
   })
 
   it("never redirects approval to a provider-supplied spender", async () => {
@@ -1085,6 +1179,130 @@ describe("bounded Squid execution", () => {
       ),
     ).rejects.toThrow("source identity")
     expect(mocked.calls.send).toBe(0)
+  })
+
+  it("reports a freshly submitted transaction that reverts", async () => {
+    const mocked = clients({ allowance: 10n })
+    mocked.source.waitForTransactionReceipt = async () => ({
+      status: "reverted",
+    })
+    await expect(
+      executeSquidFunding(input(), dependencies(mocked)),
+    ).rejects.toThrow("Transaction reverted")
+    expect(mocked.calls.send).toBe(1)
+  })
+
+  it("reports a saved pending transaction that resumes to reverted", async () => {
+    const mocked = clients({ allowance: 10n })
+    const completed = await executeSquidFunding(input(), dependencies(mocked))
+    const pending = {
+      ...completed,
+      steps: completed.steps.map((step) => ({
+        ...step,
+        receiptStatus: undefined,
+      })),
+    }
+    mocked.source.waitForTransactionReceipt = async () => ({
+      status: "reverted",
+    })
+    const sends = mocked.calls.send
+    await expect(
+      executeSquidFunding(input(), dependencies(mocked, pending)),
+    ).rejects.toThrow("Resumed transaction reverted")
+    expect(mocked.calls.send).toBe(sends)
+  })
+
+  it("bounds pending status polling and reports exhaustion", async () => {
+    const mocked = clients({
+      allowance: 10n,
+      destinationBalances: [0n, 0n, 0n],
+    })
+    const deps = dependencies(mocked)
+    const waits: number[] = []
+    deps.status = async () => {
+      mocked.calls.status += 1
+      return "pending"
+    }
+    deps.sleep = async (milliseconds) => {
+      waits.push(milliseconds)
+    }
+    await expect(executeSquidFunding(input(), deps)).rejects.toThrow(
+      "poll limit",
+    )
+    expect(mocked.calls.status).toBe(2)
+    expect(waits).toEqual([1])
+    expect(mocked.calls.send).toBe(1)
+  })
+
+  it("uses Squid status options when no status callback is supplied", async () => {
+    const mocked = clients({ allowance: 10n })
+    const requests: string[] = []
+    const fetch = (async (url, init) => {
+      requests.push(String(url))
+      expect(new Headers(init?.headers).get("x-integrator-id")).toBe("test")
+      return new Response(JSON.stringify({ squidTransactionStatus: "SUCCESS" }))
+    }) as typeof globalThis.fetch
+    await executeSquidFunding(input(), {
+      ...dependencies(mocked),
+      status: undefined,
+      squidStatusOptions: {
+        integratorId: "test",
+        baseUrl: "https://example.test/v2",
+        fetch,
+      },
+    })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toContain("https://example.test/v2/status?")
+    expect(requests[0]).toContain("quoteId=fresh")
+  })
+
+  it("requires status wiring before provider or RPC activity", async () => {
+    const mocked = clients()
+    let rpcCalls = 0
+    let refreshes = 0
+    mocked.source.getChainId = async () => {
+      rpcCalls += 1
+      return 1
+    }
+    await expect(
+      executeSquidFunding(input(), {
+        ...dependencies(mocked),
+        status: undefined,
+        squidStatusOptions: undefined,
+        refreshQuote: async (planned) => {
+          refreshes += 1
+          return planned
+        },
+      }),
+    ).rejects.toThrow("status options or a status callback")
+    expect(rpcCalls).toBe(0)
+    expect(refreshes).toBe(0)
+    expect(mocked.calls.getAddresses).toBe(0)
+    expect(mocked.calls.send).toBe(0)
+  })
+
+  it("retains ambiguous send failures for manual reconciliation", async () => {
+    const mocked = clients({ allowance: 10n })
+    let submissions = 0
+    mocked.wallet.sendTransaction = async () => {
+      submissions += 1
+      throw new Error("wallet submission failed")
+    }
+    const deps = dependencies(mocked)
+    await expect(executeSquidFunding(input(), deps)).rejects.toThrow(
+      "wallet submission failed",
+    )
+    expect(submissions).toBe(1)
+    const unresolved = deps.saved().at(-1)
+    expect(unresolved?.steps).toHaveLength(1)
+    expect(unresolved?.steps[0]).toEqual(
+      expect.objectContaining({ kind: "route" }),
+    )
+    expect(unresolved?.steps[0]).not.toHaveProperty("transactionHash")
+    await expect(
+      executeSquidFunding(input(), dependencies(mocked, unresolved)),
+    ).rejects.toThrow("reconcile manually")
+    expect(submissions).toBe(1)
   })
 
   it("waits the configured interval between bounded poll attempts", async () => {

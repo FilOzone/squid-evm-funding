@@ -286,7 +286,15 @@ function assertQuote(
       refreshed.requirement.recipient,
       planned.requirement.recipient,
     ) ||
+    typeof refreshed.destinationAmount !== "bigint" ||
     refreshed.destinationAmount < planned.requirement.amount ||
+    typeof refreshed.gasLimit !== "bigint" ||
+    refreshed.gasLimit <= 0n ||
+    typeof refreshed.id !== "string" ||
+    refreshed.id.trim() === "" ||
+    (refreshed.requestId != null &&
+      (typeof refreshed.requestId !== "string" ||
+        refreshed.requestId.trim() === "")) ||
     !sameAddress(refreshed.target, target) ||
     (planned.approvalSpender != null &&
       (refreshed.approvalSpender == null ||
@@ -294,6 +302,7 @@ function assertQuote(
     (refreshed.approvalSpender != null &&
       !sameAddress(refreshed.approvalSpender, spender)) ||
     !/^0x(?:[0-9a-fA-F]{2})+$/.test(refreshed.data) ||
+    !Number.isSafeInteger(refreshed.expiresAt) ||
     refreshed.expiresAt <= now ||
     (refreshed.source.native && refreshed.value !== refreshed.sourceAmount) ||
     (!refreshed.source.native && refreshed.value !== 0n)
@@ -357,7 +366,7 @@ async function prepare(
     value: transaction.value,
     nonce: transaction.nonce,
   }
-  const [gas, fees] = await Promise.all([
+  const [estimatedGas, fees] = await Promise.all([
     client.estimateGas({ account, ...base }),
     client.estimateFeesPerGas(),
   ])
@@ -387,6 +396,10 @@ async function prepare(
   } else {
     throw new Error("Complete execution fee is unavailable")
   }
+  const gas =
+    transaction.gas != null && transaction.gas > estimatedGas
+      ? transaction.gas
+      : estimatedGas
   if (gas <= 0n) throw new Error("Complete execution fee is unavailable")
   const request = { ...base, gas, ...feeFields }
   if (feeMode === "standard") return { fee: gas * perGas, request }
@@ -451,6 +464,18 @@ export async function executeSquidFunding(
   const ids = new Set(input.quotes.map((quote) => quote.requirement.id))
   if (ids.size !== input.quotes.length)
     throw new Error("Execution requirement IDs must be unique")
+  const statusOptions = dependencies.squidStatusOptions
+  const status =
+    dependencies.status ??
+    (statusOptions == null
+      ? undefined
+      : (reference: SquidStatusReference, transactionHash: Hash) =>
+          fetchSquidStatus(
+            { status: reference, transactionHash },
+            statusOptions,
+          ))
+  if (status == null)
+    throw new Error("Squid status options or a status callback are required")
   if (
     (await dependencies.publicClient.getChainId()) !==
     input.source.chain.chainId
@@ -523,12 +548,6 @@ export async function executeSquidFunding(
   )
   if (totalNativeFee > input.maxNativeFee)
     throw new Error("Checkpoint exceeds the total-native-fee cap")
-  const nonce = await dependencies.publicClient.getTransactionCount({
-    address: input.account,
-    blockTag: "pending",
-  })
-  let nextNonce = nonce
-
   const unsentSource = () =>
     input.quotes.reduce(
       (total, quote) =>
@@ -556,9 +575,13 @@ export async function executeSquidFunding(
     if (known?.receiptStatus === "success") return known
     if (known != null)
       throw new Error("Checkpoint transaction is not reconciled")
+    const pendingNonce = await dependencies.publicClient.getTransactionCount({
+      address: input.account,
+      blockTag: "pending",
+    })
     const prepared = await prepare(
       dependencies.publicClient,
-      { ...transaction, nonce: nextNonce },
+      { ...transaction, nonce: pendingNonce },
       input.account,
       input.feeMode,
       input.opStackFeeBuffer,
@@ -619,10 +642,16 @@ export async function executeSquidFunding(
       ...prepared.request,
     }
     try {
-      if (
-        (await dependencies.walletClient.getChainId()) !==
-        input.source.chain.chainId
-      )
+      const [currentNonce, walletChainId] = await Promise.all([
+        dependencies.publicClient.getTransactionCount({
+          address: input.account,
+          blockTag: "pending",
+        }),
+        dependencies.walletClient.getChainId(),
+      ])
+      if (currentNonce !== prepared.request.nonce)
+        throw new Error("Pending nonce changed before broadcast")
+      if (walletChainId !== input.source.chain.chainId)
         throw new Error("Wallet chain does not match the Squid source chain")
       preSend?.()
     } catch (error) {
@@ -641,7 +670,6 @@ export async function executeSquidFunding(
       request as never,
     )
     const transactionHash = (await submission) as Hash
-    nextNonce += 1
     const sent = { ...intent, transactionHash }
     checkpoint = withStep(checkpoint, sent)
     await dependencies.save(checkpoint)
@@ -763,6 +791,7 @@ export async function executeSquidFunding(
         data: refreshed.data,
         value: refreshed.value,
         nonce: 0,
+        gas: refreshed.gasLimit,
       },
       before,
       route == null
@@ -805,26 +834,14 @@ export async function executeSquidFunding(
     }
     let done = false
     for (let attempt = 0; attempt < input.maxPollAttempts; attempt += 1) {
-      const status =
-        dependencies.status == null
-          ? dependencies.squidStatusOptions == null
-            ? (() => {
-                throw new Error(
-                  "Squid status options or a status callback are required",
-                )
-              })()
-            : await fetchSquidStatus(
-                { status: statusReference, transactionHash: hash },
-                dependencies.squidStatusOptions,
-              )
-          : await dependencies.status(statusReference, hash)
+      const routeStatus = await status(statusReference, hash)
       const after = await balance(
         destinationClient,
         planned.requirement.token,
         planned.requirement.recipient,
       )
-      if (status === "failed") throw new Error("Squid route failed")
-      if (status === "success" && after >= completed.destinationMinimum) {
+      if (routeStatus === "failed") throw new Error("Squid route failed")
+      if (routeStatus === "success" && after >= completed.destinationMinimum) {
         done = true
         break
       }
