@@ -86,10 +86,11 @@ export interface SquidStatusReference {
   toChainId: number
 }
 
-/** One non-sensitive checkpoint format. An intent without a hash is deliberately not resumable. */
+/** One authenticated, non-sensitive checkpoint. An intent without a hash is deliberately not resumable. */
 export interface SquidExecutionCheckpoint {
   executionId: string
   steps: readonly SquidExecutionStep[]
+  integrity: Hash
 }
 
 export type SquidPublicClient = Pick<

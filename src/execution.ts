@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from "node:crypto"
 import {
   type Address,
   encodeFunctionData,
@@ -85,6 +86,92 @@ function validStatusOptions(value: unknown): value is SquidClientOptions {
   )
 }
 
+function validIntegrityKey(value: unknown): value is Hex {
+  return typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value)
+}
+
+function canonical(value: unknown, seen = new Set<object>()): string {
+  if (value === null) return "null"
+  if (typeof value === "string") return JSON.stringify(value)
+  if (typeof value === "boolean") return value ? "true" : "false"
+  if (typeof value === "number")
+    return `{"$number":${JSON.stringify(String(value))}}`
+  if (typeof value === "bigint")
+    return `{"$bigint":${JSON.stringify(value.toString())}}`
+  if (typeof value === "undefined") return '{"$undefined":true}'
+  if (typeof value !== "object")
+    throw new Error("Checkpoint contains an unsupported value")
+  if (seen.has(value)) throw new Error("Checkpoint contains a cycle")
+  seen.add(value)
+  const encoded = Array.isArray(value)
+    ? `[${value.map((item) => canonical(item, seen)).join(",")}]`
+    : `{${Object.keys(value)
+        .sort()
+        .map(
+          (itemKey) =>
+            `${JSON.stringify(itemKey)}:${canonical(
+              (value as Record<string, unknown>)[itemKey],
+              seen,
+            )}`,
+        )
+        .join(",")}}`
+  seen.delete(value)
+  return encoded
+}
+
+function checkpointPayload(value: unknown): string {
+  if (value == null || typeof value !== "object")
+    throw new Error("Checkpoint integrity verification failed")
+  const checkpoint = value as Record<string, unknown>
+  return canonical({
+    executionId: checkpoint.executionId,
+    steps: checkpoint.steps,
+  })
+}
+
+function checkpointMac(value: unknown, integrityKey: Hex): Hash {
+  return `0x${createHmac("sha256", Buffer.from(integrityKey.slice(2), "hex"))
+    .update(checkpointPayload(value))
+    .digest("hex")}` as Hash
+}
+
+/** Internal checkpoint sealing helper; intentionally not exported from the package root. */
+export function sealSquidExecutionCheckpoint(
+  checkpoint:
+    | SquidExecutionCheckpoint
+    | Omit<SquidExecutionCheckpoint, "integrity">,
+  integrityKey: Hex,
+): SquidExecutionCheckpoint {
+  if (!validIntegrityKey(integrityKey))
+    throw new Error("A 32-byte checkpoint integrity key is required")
+  return {
+    ...checkpoint,
+    integrity: checkpointMac(checkpoint, integrityKey),
+  }
+}
+
+function assertCheckpointIntegrity(
+  value: unknown,
+  integrityKey: Hex,
+): asserts value is SquidExecutionCheckpoint {
+  const integrity =
+    value != null && typeof value === "object"
+      ? (value as Record<string, unknown>).integrity
+      : undefined
+  if (typeof integrity !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(integrity))
+    throw new Error("Checkpoint integrity verification failed")
+  let expected: Hash
+  try {
+    expected = checkpointMac(value, integrityKey)
+  } catch {
+    throw new Error("Checkpoint integrity verification failed")
+  }
+  const actualBytes = Buffer.from(integrity.slice(2), "hex")
+  const expectedBytes = Buffer.from(expected.slice(2), "hex")
+  if (!timingSafeEqual(actualBytes, expectedBytes))
+    throw new Error("Checkpoint integrity verification failed")
+}
+
 function key(
   kind: SquidExecutionStep["kind"],
   requirementId: string,
@@ -94,6 +181,7 @@ function key(
 }
 
 function executionId(input: {
+  operationId: string
   account: Address
   source: SquidQuote["source"]
   quotes: readonly SquidQuote[]
@@ -102,6 +190,7 @@ function executionId(input: {
   feeMode: "standard" | "op-stack"
 }) {
   return JSON.stringify({
+    operationId: input.operationId,
     account: input.account.toLowerCase(),
     source: [
       input.source.chain.chainId,
@@ -173,11 +262,18 @@ function assertCheckpoint(
     !Array.isArray(checkpoint.steps) ||
     Object.keys(checkpoint).some(
       (checkpointKey) =>
-        checkpointKey !== "executionId" && checkpointKey !== "steps",
+        checkpointKey !== "executionId" &&
+        checkpointKey !== "steps" &&
+        checkpointKey !== "integrity",
     ) ||
     checkpoint.executionId !== expectedId
   )
     throw new Error("Checkpoint does not match this execution")
+  if (
+    typeof checkpoint.integrity !== "string" ||
+    !/^0x[0-9a-fA-F]{64}$/.test(checkpoint.integrity)
+  )
+    throw new Error("Checkpoint has invalid integrity metadata")
   const seen = new Set<string>()
   const transactionHashes = new Set<string>()
   const approvalAttempts = new Map<string, Set<number>>()
@@ -440,6 +536,8 @@ async function prepare(
 
 export async function executeSquidFunding(
   input: {
+    operationId: string
+    checkpointIntegrityKey: Hex
     account: Address
     source: SquidQuote["source"]
     quotes: readonly SquidQuote[]
@@ -470,6 +568,10 @@ export async function executeSquidFunding(
     sleep?: (milliseconds: number) => Promise<void>
   },
 ): Promise<SquidExecutionCheckpoint> {
+  if (typeof input.operationId !== "string" || input.operationId.trim() === "")
+    throw new Error("A nonblank operation ID is required")
+  if (!validIntegrityKey(input.checkpointIntegrityKey))
+    throw new Error("A 32-byte checkpoint integrity key is required")
   if (
     input.quotes.length === 0 ||
     input.maxSourceAmount <= 0n ||
@@ -520,25 +622,6 @@ export async function executeSquidFunding(
       )
   }
   if (
-    (await dependencies.publicClient.getChainId()) !==
-    input.source.chain.chainId
-  )
-    throw new Error("Source RPC chain does not match the Squid source chain")
-  if (
-    (await dependencies.walletClient.getChainId()) !==
-    input.source.chain.chainId
-  )
-    throw new Error("Wallet chain does not match the Squid source chain")
-  const configuredAccount = dependencies.walletClient.account
-  if (
-    configuredAccount != null
-      ? !sameAddress(configuredAccount.address, input.account)
-      : !(await dependencies.walletClient.getAddresses()).some((address) =>
-          sameAddress(address, input.account),
-        )
-  )
-    throw new Error("Wallet client does not control the requested account")
-  if (
     native(input.source.token) !== input.source.native ||
     input.quotes.some(
       (quote) =>
@@ -558,7 +641,15 @@ export async function executeSquidFunding(
   if (sourceAmount > input.maxSourceAmount)
     throw new Error("Execution would exceed the source-token cap")
   const id = executionId(input)
-  let checkpoint = (await dependencies.load()) ?? { executionId: id, steps: [] }
+  const loaded = await dependencies.load()
+  if (loaded != null)
+    assertCheckpointIntegrity(loaded, input.checkpointIntegrityKey)
+  let checkpoint =
+    loaded ??
+    sealSquidExecutionCheckpoint(
+      { executionId: id, steps: [] },
+      input.checkpointIntegrityKey,
+    )
   assertCheckpoint(
     checkpoint,
     id,
@@ -571,6 +662,33 @@ export async function executeSquidFunding(
     },
     input.feeMode,
   )
+  const saveCheckpoint = async (next: SquidExecutionCheckpoint) => {
+    const sealed = sealSquidExecutionCheckpoint(
+      next,
+      input.checkpointIntegrityKey,
+    )
+    await dependencies.save(sealed)
+    return sealed
+  }
+  if (
+    (await dependencies.publicClient.getChainId()) !==
+    input.source.chain.chainId
+  )
+    throw new Error("Source RPC chain does not match the Squid source chain")
+  if (
+    (await dependencies.walletClient.getChainId()) !==
+    input.source.chain.chainId
+  )
+    throw new Error("Wallet chain does not match the Squid source chain")
+  const configuredAccount = dependencies.walletClient.account
+  if (
+    configuredAccount != null
+      ? !sameAddress(configuredAccount.address, input.account)
+      : !(await dependencies.walletClient.getAddresses()).some((address) =>
+          sameAddress(address, input.account),
+        )
+  )
+    throw new Error("Wallet client does not control the requested account")
   if (checkpoint.steps.some((item) => item.transactionHash == null))
     throw new Error(
       "Checkpoint intent has no transaction hash; reconcile manually before resuming",
@@ -591,7 +709,7 @@ export async function executeSquidFunding(
         ...step,
         receiptStatus: receipt.status,
       })
-      await dependencies.save(checkpoint)
+      checkpoint = await saveCheckpoint(checkpoint)
       if (receipt.status !== "success")
         throw new Error("Resumed transaction reverted")
     }
@@ -697,7 +815,7 @@ export async function executeSquidFunding(
       ...(statusReference == null ? {} : statusReference),
     }
     checkpoint = withStep(checkpoint, intent)
-    await dependencies.save(checkpoint)
+    checkpoint = await saveCheckpoint(checkpoint)
     const request = {
       account: configuredAccount ?? input.account,
       chain: undefined,
@@ -723,7 +841,7 @@ export async function executeSquidFunding(
             key(intent.kind, intent.requirementId, intent.attempt),
         ),
       }
-      await dependencies.save(checkpoint)
+      checkpoint = await saveCheckpoint(checkpoint)
       throw error
     }
     const submission = dependencies.walletClient.sendTransaction(
@@ -732,7 +850,7 @@ export async function executeSquidFunding(
     const transactionHash = (await submission) as Hash
     const sent = { ...intent, transactionHash }
     checkpoint = withStep(checkpoint, sent)
-    await dependencies.save(checkpoint)
+    checkpoint = await saveCheckpoint(checkpoint)
     const receipt = await dependencies.publicClient.waitForTransactionReceipt({
       hash: transactionHash,
     })
@@ -740,7 +858,7 @@ export async function executeSquidFunding(
       ...sent,
       receiptStatus: receipt.status,
     })
-    await dependencies.save(checkpoint)
+    checkpoint = await saveCheckpoint(checkpoint)
     if (receipt.status !== "success") throw new Error("Transaction reverted")
     return current(checkpoint, kind, requirementId) as SquidExecutionStep
   }

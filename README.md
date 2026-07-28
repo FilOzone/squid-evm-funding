@@ -21,16 +21,21 @@ seed down to the proportional input.
 
 `executeSquidFunding` is the opt-in execution step. The caller supplies viem
 public/wallet clients, account, route refresh/status functions, destination
-clients, and non-sensitive checkpoint load/save callbacks. Planning is
-read-only; execution asks the supplied wallet client to sign and send each
-approval and route transaction. The wallet must be on the source chain and
-control the requested account; a configured local viem account is passed
-through unchanged. Immediately before each broadcast, execution rechecks the
-wallet chain and route expiry; a failed check clears the known-unsent intent.
-Execution uses only the caller-approved route target and spender, persists
-intent before sending, and does not retry an intent that has no transaction
-hash. If an allowance changes after a successful approval, a new checkpointed
-attempt preserves the prior transaction and fee history.
+clients, and checkpoint load/save callbacks. Each logical execution also has a
+nonblank `operationId` and a caller-held 32-byte `checkpointIntegrityKey`.
+Checkpoints are bound to that operation and authenticated with HMAC-SHA256
+before any RPC call; every saved checkpoint is authenticated again. The key is
+not stored in the checkpoint, and authentication does not encrypt the
+non-sensitive checkpoint contents. Planning is read-only; execution asks the
+supplied wallet client to sign and send each approval and route transaction.
+The wallet must be on the source chain and control the requested account; a
+configured local viem account is passed through unchanged. Immediately before
+each broadcast, execution rechecks the wallet chain and route expiry; a failed
+check clears the known-unsent intent. Execution uses only the caller-approved
+route target and spender, persists intent before sending, and does not retry an
+intent that has no transaction hash. If an allowance changes after a successful
+approval, a new checkpointed attempt preserves the prior transaction and fee
+history.
 Route completion is checked at most
 `maxPollAttempts` times, with `pollIntervalMs` between attempts. The package
 schedules no more than `(maxPollAttempts - 1) * pollIntervalMs` of polling

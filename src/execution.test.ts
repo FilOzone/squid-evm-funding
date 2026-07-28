@@ -1,5 +1,6 @@
-import { type Account, decodeFunctionData, erc20Abi } from "viem"
+import { type Account, decodeFunctionData, erc20Abi, type Hex } from "viem"
 import { describe, expect, it } from "vitest"
+import { sealSquidExecutionCheckpoint } from "./execution.js"
 import {
   executeSquidFunding,
   type SquidExecutionCheckpoint,
@@ -17,6 +18,7 @@ const spender = "0x5555555555555555555555555555555555555555" as const
 const thirdParty = "0x6666666666666666666666666666666666666666" as const
 const hash =
   "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const
+const checkpointIntegrityKey = `0x${"11".repeat(32)}` as Hex
 
 function quote(overrides: Partial<SquidQuote> = {}): SquidQuote {
   return {
@@ -183,6 +185,8 @@ function clients(
 
 function input(quotes: readonly SquidQuote[] = [quote()]) {
   return {
+    operationId: "test-operation",
+    checkpointIntegrityKey,
     account,
     source: quotes[0]?.source as SquidQuote["source"],
     quotes,
@@ -194,6 +198,13 @@ function input(quotes: readonly SquidQuote[] = [quote()]) {
     maxPollAttempts: 2,
     pollIntervalMs: 1,
   }
+}
+
+function reseal(
+  checkpoint: SquidExecutionCheckpoint,
+  integrityKey: Hex = checkpointIntegrityKey,
+) {
+  return sealSquidExecutionCheckpoint(checkpoint, integrityKey)
 }
 
 function dependencies(
@@ -267,6 +278,55 @@ async function resetOnlyRetryCheckpoint(mocked: ReturnType<typeof clients>) {
 }
 
 describe("bounded Squid execution", () => {
+  it("rejects malformed operation IDs and integrity keys before I/O", async () => {
+    const cases: Array<[string, Record<string, unknown>, string]> = [
+      ["blank operation ID", { operationId: " " }, "operation ID"],
+      [
+        "short integrity key",
+        { checkpointIntegrityKey: "0x11" },
+        "32-byte checkpoint integrity key",
+      ],
+      [
+        "non-hex integrity key",
+        { checkpointIntegrityKey: `0x${"gg".repeat(32)}` },
+        "32-byte checkpoint integrity key",
+      ],
+      [
+        "missing integrity key",
+        { checkpointIntegrityKey: undefined },
+        "32-byte checkpoint integrity key",
+      ],
+    ]
+    for (const [name, overrides, message] of cases) {
+      const mocked = clients()
+      let rpcCalls = 0
+      let refreshes = 0
+      let loads = 0
+      mocked.source.getChainId = async () => {
+        rpcCalls += 1
+        return 1
+      }
+      const deps = dependencies(mocked)
+      deps.refreshQuote = async (planned) => {
+        refreshes += 1
+        return planned
+      }
+      deps.load = async () => {
+        loads += 1
+        return undefined
+      }
+      await expect(
+        executeSquidFunding({ ...input(), ...overrides } as never, deps),
+        name,
+      ).rejects.toThrow(message)
+      expect(loads, name).toBe(0)
+      expect(rpcCalls, name).toBe(0)
+      expect(refreshes, name).toBe(0)
+      expect(mocked.calls.getAddresses, name).toBe(0)
+      expect(mocked.calls.send, name).toBe(0)
+    }
+  })
+
   it("persists an intent before every broadcast", async () => {
     const mocked = clients()
     const deps = dependencies(mocked)
@@ -283,14 +343,17 @@ describe("bounded Squid execution", () => {
     const mocked = clients()
     const initial = await executeSquidFunding(input(), dependencies(mocked))
     const sends = mocked.calls.send
-    const deps = dependencies(mocked, {
-      ...initial,
-      steps: initial.steps.map((step) =>
-        step.kind === "route"
-          ? { ...step, transactionHash: undefined, receiptStatus: undefined }
-          : step,
-      ),
-    })
+    const deps = dependencies(
+      mocked,
+      reseal({
+        ...initial,
+        steps: initial.steps.map((step) =>
+          step.kind === "route"
+            ? { ...step, transactionHash: undefined, receiptStatus: undefined }
+            : step,
+        ),
+      }),
+    )
     await expect(executeSquidFunding(input(), deps)).rejects.toThrow(
       "reconcile manually",
     )
@@ -416,10 +479,10 @@ describe("bounded Squid execution", () => {
     const mocked = clients({ fee: 3n })
     const initial = await executeSquidFunding(input(), dependencies(mocked))
     const sends = mocked.calls.send
-    const checkpoint: SquidExecutionCheckpoint = {
+    const checkpoint = reseal({
       ...initial,
       steps: initial.steps.filter((step) => step.kind === "approval"),
-    }
+    })
     await expect(
       executeSquidFunding(
         { ...input(), maxNativeFee: 5n },
@@ -457,6 +520,71 @@ describe("bounded Squid execution", () => {
         maxPriorityFeePerGas: 1n,
       }),
     )
+  })
+
+  it("rejects a lowered authenticated OP Stack fee before the next send", async () => {
+    const first = quote()
+    const second = quote({
+      requirement: { ...first.requirement, id: "fund-2" },
+    })
+    const mocked = clients({ totalFee: 4n })
+    const interrupted = dependencies(mocked)
+    interrupted.refreshQuote = async (planned) => {
+      if (planned.requirement.id === "fund-2")
+        throw new Error("simulated interruption")
+      return { ...planned, id: "fresh" }
+    }
+    await expect(
+      executeSquidFunding(
+        {
+          ...input([first, second]),
+          maxSourceAmount: 20n,
+          maxNativeFee: 20n,
+          feeMode: "op-stack",
+          opStackFeeBuffer: (fee) => fee,
+        },
+        interrupted,
+      ),
+    ).rejects.toThrow("simulated interruption")
+    const checkpoint = interrupted.saved().at(-1)
+    expect(checkpoint).toBeDefined()
+    const forged = {
+      ...(checkpoint as SquidExecutionCheckpoint),
+      steps: (checkpoint as SquidExecutionCheckpoint).steps.map((step) =>
+        step.kind === "route"
+          ? { ...step, nativeFee: step.nativeFee - 1n }
+          : step,
+      ),
+    }
+    const sends = mocked.calls.send
+    const transactionReads = mocked.calls.getTransaction
+    let rpcCalls = 0
+    let refreshes = 0
+    mocked.source.getChainId = async () => {
+      rpcCalls += 1
+      return 1
+    }
+    const resumed = dependencies(mocked, forged)
+    resumed.refreshQuote = async (planned) => {
+      refreshes += 1
+      return planned
+    }
+    await expect(
+      executeSquidFunding(
+        {
+          ...input([first, second]),
+          maxSourceAmount: 20n,
+          maxNativeFee: 20n,
+          feeMode: "op-stack",
+          opStackFeeBuffer: (fee) => fee,
+        },
+        resumed,
+      ),
+    ).rejects.toThrow("Checkpoint integrity verification failed")
+    expect(rpcCalls).toBe(0)
+    expect(refreshes).toBe(0)
+    expect(mocked.calls.getTransaction).toBe(transactionReads)
+    expect(mocked.calls.send).toBe(sends)
   })
 
   it("rejects a refreshed route that changes its trusted target", async () => {
@@ -725,6 +853,37 @@ describe("bounded Squid execution", () => {
     expect(refreshes).toBe(1)
   })
 
+  it("rejects a successful route spliced from an older checkpoint", async () => {
+    const mocked = clients({
+      destinationBalances: [0n, 10n, 10n, 20n],
+    })
+    const older = await executeSquidFunding(input(), dependencies(mocked))
+    const current = await executeSquidFunding(input(), dependencies(mocked))
+    const olderRoute = older.steps.find((step) => step.kind === "route")
+    expect(olderRoute).toBeDefined()
+    const forged = {
+      ...current,
+      steps: current.steps.map((step) =>
+        step.kind === "route" ? (olderRoute as SquidExecutionStep) : step,
+      ),
+    }
+    const sends = mocked.calls.send
+    const statusCalls = mocked.calls.status
+    const transactionReads = mocked.calls.getTransaction
+    let rpcCalls = 0
+    mocked.source.getChainId = async () => {
+      rpcCalls += 1
+      return 1
+    }
+    await expect(
+      executeSquidFunding(input(), dependencies(mocked, forged)),
+    ).rejects.toThrow("Checkpoint integrity verification failed")
+    expect(rpcCalls).toBe(0)
+    expect(mocked.calls.getTransaction).toBe(transactionReads)
+    expect(mocked.calls.status).toBe(statusCalls)
+    expect(mocked.calls.send).toBe(sends)
+  })
+
   it("re-quotes and rejects a changed target after approval", async () => {
     const mocked = clients()
     const deps = dependencies(mocked)
@@ -779,12 +938,12 @@ describe("bounded Squid execution", () => {
       { ...input([planned, second]), maxSourceAmount: 20n },
       dependencies(firstMocked),
     )
-    const checkpoint = {
+    const checkpoint = reseal({
       ...first,
       steps: first.steps.filter(
         (step) => !(step.kind === "route" && step.requirementId === "fund-2"),
       ),
-    }
+    })
     firstMocked.source.getBalance = async () => 16n
     const sends = firstMocked.calls.send
     await executeSquidFunding(
@@ -796,9 +955,18 @@ describe("bounded Squid execution", () => {
 
   it("resumes known transactions without resubmitting them", async () => {
     const mocked = clients()
-    const checkpoint = await executeSquidFunding(input(), dependencies(mocked))
+    const deps = dependencies(mocked)
+    const checkpoint = await executeSquidFunding(input(), deps)
+    expect(checkpoint.integrity).toMatch(/^0x[0-9a-f]{64}$/)
+    expect(deps.saved()).not.toHaveLength(0)
+    for (const saved of deps.saved())
+      expect(saved.integrity).toMatch(/^0x[0-9a-f]{64}$/)
     const sends = mocked.calls.send
-    await executeSquidFunding(input(), dependencies(mocked, checkpoint))
+    const resumed = await executeSquidFunding(
+      input(),
+      dependencies(mocked, checkpoint),
+    )
+    expect(resumed).toEqual(checkpoint)
     expect(mocked.calls.send).toBe(sends)
     expect(mocked.calls.status).toBe(2)
   })
@@ -828,13 +996,13 @@ describe("bounded Squid execution", () => {
     ).rejects.toThrow("trust checks")
     const completed = initial.saved().at(-1)
     expect(completed).toBeDefined()
-    const pending = {
+    const pending = reseal({
       ...(completed as SquidExecutionCheckpoint),
       steps: (completed as SquidExecutionCheckpoint).steps.map((step) => ({
         ...step,
         receiptStatus: undefined,
       })),
-    }
+    })
     let sourceBalance = 100n
     const readContract = mocked.source.readContract.bind(mocked.source)
     mocked.source.readContract = async (request: { functionName: string }) =>
@@ -1127,31 +1295,31 @@ describe("bounded Squid execution", () => {
   it("rejects duplicate hashes and malformed checkpoint step shapes", async () => {
     const mocked = clients()
     const checkpoint = await executeSquidFunding(input(), dependencies(mocked))
-    const duplicateHash = {
+    const duplicateHash = reseal({
       ...checkpoint,
       steps: checkpoint.steps.map((step) => ({
         ...step,
         transactionHash: hash,
       })),
-    }
+    })
     await expect(
       executeSquidFunding(input(), dependencies(mocked, duplicateHash)),
     ).rejects.toThrow("invalid execution steps")
 
-    const unknownField = {
+    const unknownField = reseal({
       ...checkpoint,
       steps: checkpoint.steps.map((step, index) =>
         index === 0 ? { ...step, unexpected: true } : step,
       ),
-    } as unknown as SquidExecutionCheckpoint
+    } as unknown as SquidExecutionCheckpoint)
     await expect(
       executeSquidFunding(input(), dependencies(mocked, unknownField)),
     ).rejects.toThrow("invalid execution steps")
 
-    const unknownCheckpointField = {
+    const unknownCheckpointField = reseal({
       ...checkpoint,
       unexpected: true,
-    } as unknown as SquidExecutionCheckpoint
+    } as unknown as SquidExecutionCheckpoint)
     await expect(
       executeSquidFunding(
         input(),
@@ -1159,32 +1327,32 @@ describe("bounded Squid execution", () => {
       ),
     ).rejects.toThrow("does not match this execution")
 
-    const incompleteFees = {
+    const incompleteFees = reseal({
       ...checkpoint,
       steps: checkpoint.steps.map((step, index) =>
         index === 0 ? { ...step, maxPriorityFeePerGas: undefined } : step,
       ),
-    }
+    })
     await expect(
       executeSquidFunding(input(), dependencies(mocked, incompleteFees)),
     ).rejects.toThrow("invalid execution steps")
 
-    const malformedHash = {
+    const malformedHash = reseal({
       ...checkpoint,
       steps: checkpoint.steps.map((step, index) =>
         index === 0 ? { ...step, transactionHash: 42 } : step,
       ),
-    } as unknown as SquidExecutionCheckpoint
+    } as unknown as SquidExecutionCheckpoint)
     await expect(
       executeSquidFunding(input(), dependencies(mocked, malformedHash)),
     ).rejects.toThrow("invalid execution steps")
 
-    const noncontiguousAttempt = {
+    const noncontiguousAttempt = reseal({
       ...checkpoint,
       steps: checkpoint.steps.map((step) =>
         step.kind === "approval" ? { ...step, attempt: 2 } : step,
       ),
-    }
+    })
     await expect(
       executeSquidFunding(input(), dependencies(mocked, noncontiguousAttempt)),
     ).rejects.toThrow("invalid execution steps")
@@ -1196,12 +1364,12 @@ describe("bounded Squid execution", () => {
     const sends = mocked.calls.send
     const statusCalls = mocked.calls.status
     for (const destinationMinimum of [0n, 9n]) {
-      const invalid = {
+      const invalid = reseal({
         ...checkpoint,
         steps: checkpoint.steps.map((step) =>
           step.kind === "route" ? { ...step, destinationMinimum } : step,
         ),
-      }
+      })
       await expect(
         executeSquidFunding(input(), dependencies(mocked, invalid)),
       ).rejects.toThrow("invalid execution steps")
@@ -1273,12 +1441,12 @@ describe("bounded Squid execution", () => {
         input(),
         dependencies(mocked),
       )
-      const invalid = {
+      const invalid = reseal({
         ...checkpoint,
         steps: checkpoint.steps.map((item) =>
           item.kind === kind ? { ...item, ...step } : item,
         ),
-      } as SquidExecutionCheckpoint
+      } as SquidExecutionCheckpoint)
       const changed = invalid.steps.find((item) => item.kind === kind)
       if (transaction != null && changed?.transactionHash != null)
         mocked.setTransactionFields(changed.transactionHash, transaction)
@@ -1326,6 +1494,35 @@ describe("bounded Squid execution", () => {
     ).rejects.toThrow("does not match this execution")
   })
 
+  it("rejects a valid checkpoint from a different operation before RPC", async () => {
+    const mocked = clients()
+    const checkpoint = await executeSquidFunding(
+      { ...input(), operationId: "operation-a" },
+      dependencies(mocked),
+    )
+    expect(JSON.parse(checkpoint.executionId)).toEqual(
+      expect.objectContaining({ operationId: "operation-a" }),
+    )
+    const sends = mocked.calls.send
+    const statusCalls = mocked.calls.status
+    const transactionReads = mocked.calls.getTransaction
+    let rpcCalls = 0
+    mocked.source.getChainId = async () => {
+      rpcCalls += 1
+      return 1
+    }
+    await expect(
+      executeSquidFunding(
+        { ...input(), operationId: "operation-b" },
+        dependencies(mocked, checkpoint),
+      ),
+    ).rejects.toThrow("does not match this execution")
+    expect(rpcCalls).toBe(0)
+    expect(mocked.calls.getTransaction).toBe(transactionReads)
+    expect(mocked.calls.status).toBe(statusCalls)
+    expect(mocked.calls.send).toBe(sends)
+  })
+
   it("requires the native flag to match the source token sentinel", async () => {
     const mocked = clients()
     await expect(
@@ -1355,13 +1552,13 @@ describe("bounded Squid execution", () => {
   it("reports a saved pending transaction that resumes to reverted", async () => {
     const mocked = clients({ allowance: 10n })
     const completed = await executeSquidFunding(input(), dependencies(mocked))
-    const pending = {
+    const pending = reseal({
       ...completed,
       steps: completed.steps.map((step) => ({
         ...step,
         receiptStatus: undefined,
       })),
-    }
+    })
     mocked.source.waitForTransactionReceipt = async () => ({
       status: "reverted",
     })
