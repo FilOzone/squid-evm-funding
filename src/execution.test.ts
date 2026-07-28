@@ -1,6 +1,5 @@
 import { type Account, decodeFunctionData, erc20Abi, type Hex } from "viem"
 import { describe, expect, it } from "vitest"
-import { sealSquidExecutionCheckpoint } from "./execution.js"
 import {
   executeSquidFunding,
   type SquidExecutionCheckpoint,
@@ -8,6 +7,7 @@ import {
   type SquidPublicClient,
   type SquidQuote,
   type SquidWalletClient,
+  sealSquidExecutionCheckpoint,
 } from "./index.js"
 
 const account = "0x1111111111111111111111111111111111111111" as const
@@ -1752,11 +1752,17 @@ describe("bounded Squid execution", () => {
   })
 
   it("retains ambiguous send failures for manual reconciliation", async () => {
-    const mocked = clients({ allowance: 10n })
+    const mocked = clients({
+      allowance: 10n,
+      destinationBalances: [0n, 0n, 10n],
+    })
+    const sendTransaction = mocked.wallet.sendTransaction.bind(mocked.wallet)
     let submissions = 0
-    mocked.wallet.sendTransaction = async () => {
+    let failBeforeBroadcast = true
+    mocked.wallet.sendTransaction = async (request) => {
       submissions += 1
-      throw new Error("wallet submission failed")
+      if (failBeforeBroadcast) throw new Error("wallet submission failed")
+      return sendTransaction(request)
     }
     const deps = dependencies(mocked)
     await expect(executeSquidFunding(input(), deps)).rejects.toThrow(
@@ -1773,6 +1779,72 @@ describe("bounded Squid execution", () => {
       executeSquidFunding(input(), dependencies(mocked, unresolved)),
     ).rejects.toThrow("reconcile manually")
     expect(submissions).toBe(1)
+
+    failBeforeBroadcast = false
+    const provenUnsent = sealSquidExecutionCheckpoint(
+      {
+        ...(unresolved as SquidExecutionCheckpoint),
+        steps: (unresolved as SquidExecutionCheckpoint).steps.filter(
+          (step) => step.transactionHash != null,
+        ),
+      },
+      checkpointIntegrityKey,
+    )
+    const completed = await executeSquidFunding(
+      input(),
+      dependencies(mocked, provenUnsent),
+    )
+    expect(completed.steps.find((step) => step.kind === "route")).toEqual(
+      expect.objectContaining({ receiptStatus: "success" }),
+    )
+    expect(submissions).toBe(2)
+    expect(mocked.calls.send).toBe(1)
+  })
+
+  it("reseals a manually recovered hash after checkpoint persistence fails", async () => {
+    const mocked = clients({ allowance: 10n })
+    const sendTransaction = mocked.wallet.sendTransaction.bind(mocked.wallet)
+    let recoveredHash: Hex | undefined
+    mocked.wallet.sendTransaction = async (request) => {
+      const transactionHash = await sendTransaction(request)
+      recoveredHash = transactionHash
+      return transactionHash
+    }
+    const deps = dependencies(mocked)
+    const save = deps.save
+    deps.save = async (checkpoint) => {
+      if (checkpoint.steps.some((step) => step.transactionHash != null))
+        throw new Error("checkpoint persistence failed")
+      await save(checkpoint)
+    }
+    await expect(executeSquidFunding(input(), deps)).rejects.toThrow(
+      "checkpoint persistence failed",
+    )
+    expect(recoveredHash).toBeDefined()
+    const unresolved = deps.saved().at(-1)
+    expect(unresolved?.steps[0]).not.toHaveProperty("transactionHash")
+    const reconciled = sealSquidExecutionCheckpoint(
+      {
+        ...(unresolved as SquidExecutionCheckpoint),
+        steps: (unresolved as SquidExecutionCheckpoint).steps.map((step) => ({
+          ...step,
+          transactionHash: recoveredHash as Hex,
+        })),
+      },
+      checkpointIntegrityKey,
+    )
+    const sends = mocked.calls.send
+    const completed = await executeSquidFunding(
+      input(),
+      dependencies(mocked, reconciled),
+    )
+    expect(completed.steps[0]).toEqual(
+      expect.objectContaining({
+        transactionHash: recoveredHash,
+        receiptStatus: "success",
+      }),
+    )
+    expect(mocked.calls.send).toBe(sends)
   })
 
   it("waits the configured interval between bounded poll attempts", async () => {

@@ -135,7 +135,7 @@ function checkpointMac(value: unknown, integrityKey: Hex): Hash {
     .digest("hex")}` as Hash
 }
 
-/** Internal checkpoint sealing helper; intentionally not exported from the package root. */
+/** Authenticate a checkpoint after the caller has manually reconciled a hashless intent on chain. */
 export function sealSquidExecutionCheckpoint(
   checkpoint:
     | SquidExecutionCheckpoint

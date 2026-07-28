@@ -36,6 +36,26 @@ route target and spender, persists intent before sending, and does not retry an
 intent that has no transaction hash. If an allowance changes after a successful
 approval, a new checkpointed attempt preserves the prior transaction and fee
 history.
+
+If execution stops with an intent that has no transaction hash, reconcile it
+against the wallet and source chain before editing the checkpoint or attempting
+another send. If the transaction was broadcast, attach its recovered hash to
+the matching step. If it is proven not to have been broadcast, remove that
+hashless step. Then call `sealSquidExecutionCheckpoint` with the same
+`checkpointIntegrityKey`, save the returned checkpoint, and resume with the
+same operation and execution inputs. The sealer authenticates the caller's
+manual decision; it does not perform or replace the on-chain reconciliation.
+
+```ts
+import { sealSquidExecutionCheckpoint } from "squid-evm-funding"
+
+const reconciled = sealSquidExecutionCheckpoint(
+  { ...checkpoint, steps: reconciledSteps },
+  checkpointIntegrityKey,
+)
+await save(reconciled)
+```
+
 Route completion is checked at most
 `maxPollAttempts` times, with `pollIntervalMs` between attempts. The package
 schedules no more than `(maxPollAttempts - 1) * pollIntervalMs` of polling

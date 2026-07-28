@@ -1,5 +1,8 @@
 export { parseSquidCatalog, resolveSourceToken } from "./catalog.js"
-export { executeSquidFunding } from "./execution.js"
+export {
+  executeSquidFunding,
+  sealSquidExecutionCheckpoint,
+} from "./execution.js"
 export { planSquidFunding } from "./planner.js"
 export {
   fetchSquidCatalog,
