@@ -632,6 +632,29 @@ describe("bounded Squid execution", () => {
     )
   })
 
+  it("checks the wallet chain after the final pending-nonce read", async () => {
+    const mocked = clients({
+      allowance: 10n,
+      destinationBalances: [0n, 0n, 10n],
+    })
+    let nonceReads = 0
+    mocked.source.getTransactionCount = async () => {
+      nonceReads += 1
+      if (nonceReads === 2) {
+        await Promise.resolve()
+        mocked.setWalletChainId(10)
+      }
+      return 7
+    }
+    const deps = dependencies(mocked)
+    await expect(executeSquidFunding(input(), deps)).rejects.toThrow(
+      "Wallet chain",
+    )
+    expect(nonceReads).toBe(2)
+    expect(mocked.calls.send).toBe(0)
+    expect(deps.saved().at(-1)?.steps).toEqual([])
+  })
+
   it("never redirects approval to a provider-supplied spender", async () => {
     const mocked = clients()
     const deps = dependencies(mocked)
@@ -1279,6 +1302,119 @@ describe("bounded Squid execution", () => {
     expect(refreshes).toBe(0)
     expect(mocked.calls.getAddresses).toBe(0)
     expect(mocked.calls.send).toBe(0)
+  })
+
+  it("rejects malformed status wiring before provider or RPC activity", async () => {
+    const cases: Array<
+      [string, { status: unknown; squidStatusOptions: unknown }, string]
+    > = [
+      [
+        "non-callable callback",
+        {
+          status: "success",
+          squidStatusOptions: { integratorId: "test", fetch: async () => {} },
+        },
+        "status callback",
+      ],
+      [
+        "non-object options",
+        { status: undefined, squidStatusOptions: "test" },
+        "status options",
+      ],
+      [
+        "non-string integrator ID",
+        { status: undefined, squidStatusOptions: { integratorId: 1 } },
+        "status options",
+      ],
+      [
+        "blank integrator ID",
+        { status: undefined, squidStatusOptions: { integratorId: " " } },
+        "status options",
+      ],
+      [
+        "blank base URL",
+        {
+          status: undefined,
+          squidStatusOptions: { integratorId: "test", baseUrl: " " },
+        },
+        "status options",
+      ],
+      [
+        "non-string base URL",
+        {
+          status: undefined,
+          squidStatusOptions: { integratorId: "test", baseUrl: 1 },
+        },
+        "status options",
+      ],
+      [
+        "non-callable fetch",
+        {
+          status: undefined,
+          squidStatusOptions: { integratorId: "test", fetch: "fetch" },
+        },
+        "status options",
+      ],
+      [
+        "null fetch",
+        {
+          status: undefined,
+          squidStatusOptions: { integratorId: "test", fetch: null },
+        },
+        "status options",
+      ],
+    ]
+    for (const [name, wiring, message] of cases) {
+      const mocked = clients()
+      let rpcCalls = 0
+      let refreshes = 0
+      let providerCalls = 0
+      mocked.source.getChainId = async () => {
+        rpcCalls += 1
+        return 1
+      }
+      const deps = {
+        ...dependencies(mocked),
+        status: wiring.status as never,
+        squidStatusOptions: wiring.squidStatusOptions as never,
+        refreshQuote: async (planned: SquidQuote) => {
+          refreshes += 1
+          return planned
+        },
+      }
+      const options = deps.squidStatusOptions as { fetch?: unknown } | undefined
+      if (options != null && typeof options === "object") {
+        if (options.fetch === undefined)
+          options.fetch = (() => {
+            providerCalls += 1
+          }) as never
+        else if (typeof options.fetch === "function") {
+          const configuredFetch = options.fetch
+          options.fetch = ((...args: unknown[]) => {
+            providerCalls += 1
+            return configuredFetch(...args)
+          }) as never
+        }
+      }
+      await expect(executeSquidFunding(input(), deps), name).rejects.toThrow(
+        message,
+      )
+      expect(rpcCalls, name).toBe(0)
+      expect(refreshes, name).toBe(0)
+      expect(providerCalls, name).toBe(0)
+      expect(mocked.calls.getAddresses, name).toBe(0)
+      expect(mocked.calls.send, name).toBe(0)
+    }
+  })
+
+  it("prefers a callable status callback over malformed built-in options", async () => {
+    const mocked = clients({ allowance: 10n })
+    await executeSquidFunding(input(), {
+      ...dependencies(mocked),
+      squidStatusOptions: { integratorId: " " },
+    })
+    expect(mocked.calls.status).toBe(1)
+    expect(mocked.calls.send).toBe(1)
   })
 
   it("retains ambiguous send failures for manual reconciliation", async () => {

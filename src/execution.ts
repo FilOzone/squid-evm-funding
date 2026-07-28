@@ -71,6 +71,20 @@ function sleep(milliseconds: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds))
 }
 
+function validStatusOptions(value: unknown): value is SquidClientOptions {
+  if (value == null || typeof value !== "object") return false
+  const options = value as Record<string, unknown>
+  return (
+    typeof options.integratorId === "string" &&
+    options.integratorId.trim() !== "" &&
+    (options.baseUrl === undefined ||
+      (typeof options.baseUrl === "string" && options.baseUrl.trim() !== "")) &&
+    (options.fetch === undefined
+      ? typeof globalThis.fetch === "function"
+      : typeof options.fetch === "function")
+  )
+}
+
 function key(
   kind: SquidExecutionStep["kind"],
   requirementId: string,
@@ -464,18 +478,24 @@ export async function executeSquidFunding(
   const ids = new Set(input.quotes.map((quote) => quote.requirement.id))
   if (ids.size !== input.quotes.length)
     throw new Error("Execution requirement IDs must be unique")
-  const statusOptions = dependencies.squidStatusOptions
-  const status =
-    dependencies.status ??
-    (statusOptions == null
-      ? undefined
-      : (reference: SquidStatusReference, transactionHash: Hash) =>
-          fetchSquidStatus(
-            { status: reference, transactionHash },
-            statusOptions,
-          ))
-  if (status == null)
-    throw new Error("Squid status options or a status callback are required")
+  const configuredStatus: unknown = dependencies.status
+  const configuredStatusOptions: unknown = dependencies.squidStatusOptions
+  let status: NonNullable<typeof dependencies.status>
+  if (configuredStatus != null) {
+    if (typeof configuredStatus !== "function")
+      throw new Error("Squid status callback must be callable")
+    status = configuredStatus as NonNullable<typeof dependencies.status>
+  } else {
+    if (configuredStatusOptions == null)
+      throw new Error("Squid status options or a status callback are required")
+    if (!validStatusOptions(configuredStatusOptions))
+      throw new Error("Valid Squid status options are required")
+    status = (reference: SquidStatusReference, transactionHash: Hash) =>
+      fetchSquidStatus(
+        { status: reference, transactionHash },
+        configuredStatusOptions,
+      )
+  }
   if (
     (await dependencies.publicClient.getChainId()) !==
     input.source.chain.chainId
@@ -642,15 +662,13 @@ export async function executeSquidFunding(
       ...prepared.request,
     }
     try {
-      const [currentNonce, walletChainId] = await Promise.all([
-        dependencies.publicClient.getTransactionCount({
-          address: input.account,
-          blockTag: "pending",
-        }),
-        dependencies.walletClient.getChainId(),
-      ])
+      const currentNonce = await dependencies.publicClient.getTransactionCount({
+        address: input.account,
+        blockTag: "pending",
+      })
       if (currentNonce !== prepared.request.nonce)
         throw new Error("Pending nonce changed before broadcast")
+      const walletChainId = await dependencies.walletClient.getChainId()
       if (walletChainId !== input.source.chain.chainId)
         throw new Error("Wallet chain does not match the Squid source chain")
       preSend?.()
