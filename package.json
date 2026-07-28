@@ -1,0 +1,48 @@
+{
+  "name": "squid-evm-funding",
+  "version": "0.1.0",
+  "description": "Minimal helpers for acquiring exact EVM token shortfalls through Squid",
+  "type": "module",
+  "packageManager": "pnpm@10.32.1",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/catalog.d.ts",
+    "dist/catalog.js",
+    "dist/index.d.ts",
+    "dist/index.js",
+    "dist/planner.d.ts",
+    "dist/planner.js",
+    "dist/squid.d.ts",
+    "dist/squid.js",
+    "dist/types.d.ts",
+    "dist/types.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "test": "vitest run",
+    "pack:check": "pnpm pack --pack-destination .pack && tar -tf .pack/squid-evm-funding-0.1.0.tgz | grep -q 'package/dist/index.js' && ! tar -tf .pack/squid-evm-funding-0.1.0.tgz | grep -q 'index.test' && node --input-type=module -e \"import('./dist/index.js')\""
+  },
+  "dependencies": {
+    "viem": "^2.48.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.5",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  }
+}
