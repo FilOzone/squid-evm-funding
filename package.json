@@ -13,18 +13,7 @@
     }
   },
   "files": [
-    "dist/catalog.d.ts",
-    "dist/catalog.js",
-    "dist/execution.d.ts",
-    "dist/execution.js",
-    "dist/index.d.ts",
-    "dist/index.js",
-    "dist/planner.d.ts",
-    "dist/planner.js",
-    "dist/squid.d.ts",
-    "dist/squid.js",
-    "dist/types.d.ts",
-    "dist/types.js",
+    "dist",
     "README.md",
     "LICENSE"
   ],
@@ -32,11 +21,12 @@
     "node": ">=24"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node scripts/clean-dist.mjs && tsc",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "test": "vitest run",
-    "pack:check": "pnpm pack --pack-destination .pack && tar -tf .pack/squid-evm-funding-0.1.0.tgz | grep -q 'package/dist/index.js' && ! tar -tf .pack/squid-evm-funding-0.1.0.tgz | grep -q 'index.test' && node --input-type=module -e \"const packageRoot = await import('./dist/index.js'); if (typeof packageRoot.sealSquidExecutionCheckpoint !== 'function') throw new Error('missing checkpoint sealer export')\""
+    "prepack": "pnpm run build",
+    "pack:check": "node scripts/pack-check.mjs"
   },
   "dependencies": {
     "viem": "^2.48.3"
