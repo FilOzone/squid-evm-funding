@@ -108,5 +108,8 @@ export async function planSquidFunding(
   }
   if (quotes.length !== input.requirements.length)
     throw new Error("Squid quote planning did not complete")
+  const now = Math.floor((options.now ?? Date.now)() / 1000)
+  if (quotes.some((quote) => quote.expiresAt <= now))
+    throw new Error("A planned Squid route expired before planning completed")
   return quotes
 }

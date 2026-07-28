@@ -1,10 +1,11 @@
-import type { Address, Hex } from "viem"
+import type { Address, Hash, Hex } from "viem"
 import { parseSquidCatalog } from "./catalog.js"
 import type {
   DestinationRequirement,
   SourceToken,
   SquidClientOptions,
   SquidQuote,
+  SquidStatusReference,
 } from "./types.js"
 
 const DEFAULT_BASE_URL = "https://v2.api.squidrouter.com/v2"
@@ -20,13 +21,35 @@ type RouteWire = {
       value?: string
       gasLimit?: string
       maxFeePerGas?: string
+      gasPrice?: string
       expiry?: string
       requestId?: string
+      approvalSpender?: string
     }
   }
 }
 
 export class SquidMinimumAmountError extends Error {}
+
+export function parseSquidStatus(
+  value: unknown,
+): "pending" | "success" | "failed" {
+  const status =
+    value != null && typeof value === "object"
+      ? ((value as Record<string, unknown>).squidTransactionStatus ??
+        (value as Record<string, unknown>).status)
+      : undefined
+  if (typeof status !== "string")
+    throw new Error("Invalid Squid status response")
+  if (status.toLowerCase() === "success") return "success"
+  if (
+    ["failed", "refund", "needs_gas", "partial_success"].includes(
+      status.toLowerCase(),
+    )
+  )
+    return "failed"
+  return "pending"
+}
 
 function address(value: unknown, label: string): Address {
   if (typeof value !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(value))
@@ -213,6 +236,10 @@ export async function quoteSquidRoute(
     !/^0x(?:[0-9a-fA-F]{2})+$/.test(transaction.data)
   )
     throw new Error("Invalid Squid route: calldata")
+  const approvalSpender =
+    transaction.approvalSpender == null
+      ? undefined
+      : address(transaction.approvalSpender, "approval spender")
   const estimatedRouteDuration = route.estimate?.estimatedRouteDuration
   return {
     id: route.quoteId,
@@ -230,10 +257,17 @@ export async function quoteSquidRoute(
       "minimum destination amount",
     ),
     target: address(transaction.target, "target"),
+    ...(approvalSpender == null ? {} : { approvalSpender }),
     data: transaction.data as Hex,
     value: amount(transaction.value ?? "0", "value"),
     gasLimit: amount(transaction.gasLimit, "gas limit"),
-    maxFeePerGas: amount(transaction.maxFeePerGas, "max fee per gas"),
+    maxFeePerGas: amount(
+      transaction.maxFeePerGas ?? transaction.gasPrice,
+      "max fee per gas or legacy gas price",
+    ),
+    ...(transaction.gasPrice == null
+      ? {}
+      : { gasPrice: amount(transaction.gasPrice, "legacy gas price") }),
     expiresAt,
     estimatedRouteDurationSeconds:
       typeof estimatedRouteDuration === "number" &&
@@ -242,4 +276,30 @@ export async function quoteSquidRoute(
         ? estimatedRouteDuration
         : 0,
   }
+}
+
+/** Fetch and normalize the documented Squid v2 route-status response. */
+export async function fetchSquidStatus(
+  input: { status: SquidStatusReference; transactionHash: Hash },
+  options: SquidClientOptions,
+): Promise<"pending" | "success" | "failed"> {
+  const configured = client(options)
+  const query = new URLSearchParams({
+    transactionId: input.transactionHash,
+    fromChainId: String(input.status.fromChainId),
+    toChainId: String(input.status.toChainId),
+    quoteId: input.status.quoteId,
+    ...(input.status.requestId == null
+      ? {}
+      : { requestId: input.status.requestId }),
+  })
+  const response = await configured.fetch(
+    `${configured.baseUrl}/status?${query}`,
+    {
+      headers: { "x-integrator-id": options.integratorId },
+    },
+  )
+  if (!response.ok)
+    throw new Error(`Squid status request failed (${response.status})`)
+  return parseSquidStatus(await response.json())
 }
