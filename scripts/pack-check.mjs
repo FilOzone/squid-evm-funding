@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process"
 import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { basename, join } from "node:path"
+import { basename, dirname, join } from "node:path"
 import { pathToFileURL } from "node:url"
 
 function pnpm(args, options = {}) {
@@ -17,11 +17,14 @@ function pnpm(args, options = {}) {
 
 function npm(args, options = {}) {
   if (process.platform !== "win32") return execFileSync("npm", args, options)
-  return execFileSync(
-    process.env.ComSpec ?? "cmd.exe",
-    ["/d", "/c", "npm.cmd", ...args],
-    options,
+  const npmCli = join(
+    dirname(process.execPath),
+    "node_modules",
+    "npm",
+    "bin",
+    "npm-cli.js",
   )
+  return execFileSync(process.execPath, [npmCli, ...args], options)
 }
 
 const temporaryRoot = await mkdtemp(join(tmpdir(), "squid-evm-funding-pack-"))
