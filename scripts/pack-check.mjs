@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process"
 import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
+import { pathToFileURL } from "node:url"
 
 function pnpm(args, options = {}) {
   const executable = process.env.npm_execpath
@@ -14,9 +15,18 @@ function pnpm(args, options = {}) {
   )
 }
 
+function npm(args, options = {}) {
+  return execFileSync(
+    process.platform === "win32" ? "npm.cmd" : "npm",
+    args,
+    options,
+  )
+}
+
 const temporaryRoot = await mkdtemp(join(tmpdir(), "squid-evm-funding-pack-"))
 const packDirectory = join(temporaryRoot, "pack")
 const consumerDirectory = join(temporaryRoot, "consumer")
+const gitConsumerDirectory = join(temporaryRoot, "git-consumer")
 const expectedFiles = [
   "LICENSE",
   "README.md",
@@ -48,8 +58,29 @@ async function listFiles(directory, prefix = "") {
   return files
 }
 
+function assertRootExports(directory) {
+  execFileSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      [
+        'const packageRoot = await import("squid-evm-funding")',
+        'const expected = ["NATIVE_TOKEN_ADDRESS", "SquidMinimumAmountError", "executeSquidFunding", "fetchSquidCatalog", "fetchSquidStatus", "parseSquidCatalog", "parseSquidStatus", "planSquidFunding", "quoteSquidRoute", "resolveSourceToken"]',
+        "const actual = Object.keys(packageRoot).sort()",
+        'if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error("unexpected root exports: " + actual.join(", "))',
+      ].join("\n"),
+    ],
+    { cwd: directory, stdio: "inherit" },
+  )
+}
+
 try {
-  await Promise.all([mkdir(packDirectory), mkdir(consumerDirectory)])
+  await Promise.all([
+    mkdir(packDirectory),
+    mkdir(consumerDirectory),
+    mkdir(gitConsumerDirectory),
+  ])
   pnpm(["pack", "--pack-destination", packDirectory], { stdio: "inherit" })
   const archives = (await readdir(packDirectory)).filter((file) =>
     file.endsWith(".tgz"),
@@ -65,20 +96,7 @@ try {
     cwd: consumerDirectory,
     stdio: "inherit",
   })
-  execFileSync(
-    process.execPath,
-    [
-      "--input-type=module",
-      "--eval",
-      [
-        'const packageRoot = await import("squid-evm-funding")',
-        'const expected = ["NATIVE_TOKEN_ADDRESS", "SquidMinimumAmountError", "executeSquidFunding", "fetchSquidCatalog", "fetchSquidStatus", "parseSquidCatalog", "parseSquidStatus", "planSquidFunding", "quoteSquidRoute", "resolveSourceToken"]',
-        "const actual = Object.keys(packageRoot).sort()",
-        'if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error("unexpected root exports: " + actual.join(", "))',
-      ].join("\n"),
-    ],
-    { cwd: consumerDirectory, stdio: "inherit" },
-  )
+  assertRootExports(consumerDirectory)
   const installedPackage = join(
     consumerDirectory,
     "node_modules",
@@ -87,6 +105,15 @@ try {
   const packedFiles = (await listFiles(installedPackage)).sort()
   if (JSON.stringify(packedFiles) !== JSON.stringify(expectedFiles))
     throw new Error(`unexpected packed files: ${packedFiles.join(", ")}`)
+  await writeFile(
+    join(gitConsumerDirectory, "package.json"),
+    JSON.stringify({ private: true, type: "module" }),
+  )
+  npm(["install", `git+${pathToFileURL(process.cwd()).href}`], {
+    cwd: gitConsumerDirectory,
+    stdio: "inherit",
+  })
+  assertRootExports(gitConsumerDirectory)
   const archiveSize = (await stat(archive)).size
   console.log(
     JSON.stringify(
