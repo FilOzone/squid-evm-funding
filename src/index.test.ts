@@ -72,6 +72,29 @@ function routeFetch(
 }
 
 describe("Squid catalog and planner", () => {
+  it("accepts arbitrary tokens on every selected source chain", () => {
+    const chainIds = [314, 42161, 1, 8453, 10, 137, 43114, 56]
+    const catalog = parseSquidCatalog(
+      chainIds.map((chainId) => ({
+        chainId: String(chainId),
+        type: "evm",
+        networkName: `chain-${chainId}`,
+        nativeCurrency: { symbol: "NATIVE", decimals: 18 },
+      })),
+      chainIds.map((chainId, index) => ({
+        chainId: String(chainId),
+        address: `0x${(index + 1).toString(16).padStart(40, "0")}`,
+        symbol: `T${index}`,
+        decimals: 6,
+      })),
+    )
+    expect(catalog.chains.size).toBe(8)
+    for (const [index, chainId] of chainIds.entries())
+      expect(
+        resolveSourceToken(catalog, chainId, `T${index}`).chain.chainId,
+      ).toBe(chainId)
+  })
+
   it("rejects ambiguous source symbols", () => {
     const catalog = parseSquidCatalog(chains, [
       ...tokens,

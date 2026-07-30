@@ -66,6 +66,9 @@ function assertQuote(
     refreshed.id.trim() === "" ||
     (refreshed.requestId != null && refreshed.requestId.trim() === "") ||
     !sameAddress(refreshed.target, target) ||
+    (planned.approvalSpender != null &&
+      (refreshed.approvalSpender == null ||
+        !sameAddress(refreshed.approvalSpender, planned.approvalSpender))) ||
     (refreshed.approvalSpender != null &&
       !sameAddress(refreshed.approvalSpender, spender)) ||
     !/^0x(?:[0-9a-fA-F]{2})+$/.test(refreshed.data) ||
@@ -211,6 +214,8 @@ export async function executeSquidFunding(
   )
   if (sourceAmount > input.maxSourceAmount)
     throw new Error("Execution would exceed the source-token cap")
+  if (dependencies.status != null && typeof dependencies.status !== "function")
+    throw new Error("Squid status callback must be callable")
   const status =
     dependencies.status ??
     (validStatusOptions(dependencies.squidStatusOptions)
@@ -243,7 +248,11 @@ export async function executeSquidFunding(
     throw new Error("Wallet client does not control the requested account")
   let totalNativeFee = 0n
   const routes: Array<{ requirementId: string; transactionHash: Hash }> = []
-  const send = async (transaction: Transaction, remainingSource: bigint) => {
+  const send = async (
+    transaction: Transaction,
+    remainingSource: bigint,
+    validate?: () => void,
+  ) => {
     const [latestNonce, pendingNonce] = await Promise.all([
       dependencies.publicClient.getTransactionCount({
         address: input.account,
@@ -302,6 +311,7 @@ export async function executeSquidFunding(
       input.source.chain.chainId
     )
       throw new Error("Wallet chain does not match the Squid source chain")
+    validate?.()
     totalNativeFee += prepared.fee
     const transactionHash = (await dependencies.walletClient.sendTransaction({
       account: configuredAccount ?? input.account,
@@ -407,6 +417,14 @@ export async function executeSquidFunding(
         gas: refreshed.gasLimit,
       },
       remainingSource,
+      () =>
+        assertQuote(
+          planned,
+          refreshed,
+          input.trustedTarget,
+          input.trustedSpender,
+          now(),
+        ),
     )
     const reference = {
       quoteId: refreshed.id,

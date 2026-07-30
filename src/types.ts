@@ -71,7 +71,6 @@ export type SquidPublicClient = Pick<
   | "estimateGas"
   | "getBalance"
   | "getChainId"
-  | "getTransaction"
   | "getTransactionCount"
   | "readContract"
   | "waitForTransactionReceipt"

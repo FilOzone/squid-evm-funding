@@ -110,9 +110,6 @@ function clients(
     destination,
     wallet,
     calls,
-    setAllowance: (amount: bigint) => {
-      allowance = amount
-    },
   }
 }
 
@@ -195,6 +192,29 @@ describe("stateless guarded Squid execution", () => {
     }
   })
 
+  it("rejects a non-callable status and a disappeared planned spender before sending", async () => {
+    const invalidStatus = clients()
+    await expect(
+      executeSquidFunding(input(), {
+        ...dependencies(invalidStatus),
+        status: "nope" as never,
+      }),
+    ).rejects.toThrow("status callback")
+    expect(invalidStatus.calls.send).toBe(0)
+
+    const missingSpender = clients({ allowance: 10n })
+    const planned = quote({ approvalSpender: spender })
+    const deps = dependencies(missingSpender)
+    deps.refreshQuote = async (route) => ({
+      ...route,
+      approvalSpender: undefined,
+    })
+    await expect(executeSquidFunding(input([planned]), deps)).rejects.toThrow(
+      "trust checks",
+    )
+    expect(missingSpender.calls.send).toBe(0)
+  })
+
   it("enforces source and total native-fee caps, including OP Stack total fees", async () => {
     const overSource = clients()
     await expect(
@@ -222,6 +242,38 @@ describe("stateless guarded Squid execution", () => {
         dependencies(clients()),
       ),
     ).rejects.toThrow("OP Stack total-fee")
+    await expect(
+      executeSquidFunding(
+        {
+          ...input(),
+          feeMode: "op-stack",
+          opStackFeeBuffer: (fee) => fee - 1n,
+        },
+        dependencies(clients({ totalFee: 4n })),
+      ),
+    ).rejects.toThrow("must not reduce")
+  })
+
+  it("stops a second route at the cumulative native-fee cap", async () => {
+    const first = quote()
+    const second = quote({
+      requirement: { ...first.requirement, id: "second" },
+    })
+    const mocked = clients({
+      allowance: 10n,
+      destinationBalances: [0n, 10n, 10n, 20n],
+    })
+    await expect(
+      executeSquidFunding(
+        {
+          ...input([first, second]),
+          maxSourceAmount: 20n,
+          maxNativeFee: 10n,
+        },
+        dependencies(mocked),
+      ),
+    ).rejects.toThrow("total-native-fee cap")
+    expect(mocked.calls.send).toBe(1)
   })
 
   it("keeps Filecoin/native source reserve for all unsent routes", async () => {
@@ -254,6 +306,112 @@ describe("stateless guarded Squid execution", () => {
       ),
     ).rejects.toThrow("Native balance")
     expect(mocked.calls.send).toBe(0)
+  })
+
+  it("executes native value and verifies a native destination balance", async () => {
+    const nativeSource = {
+      chain: { chainId: 1, networkName: "Ethereum" },
+      token: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" as const,
+      symbol: "ETH",
+      decimals: 18,
+      native: true,
+    }
+    const nativeQuote = quote({
+      source: nativeSource,
+      value: 10n,
+      requirement: {
+        ...quote().requirement,
+        token: nativeSource.token,
+      },
+    })
+    const mocked = clients()
+    let reads = 0
+    mocked.destination.getBalance = async () => (reads++ === 0 ? 0n : 10n)
+    const result = await executeSquidFunding(
+      { ...input([nativeQuote]), source: nativeSource },
+      dependencies(mocked),
+    )
+    expect(mocked.calls.send).toBe(1)
+    expect(mocked.calls.sent[0]).toEqual(
+      expect.objectContaining({ value: 10n }),
+    )
+    expect(result.routes).toHaveLength(1)
+  })
+
+  it("uses refreshed calldata and rechecks expiry at the broadcast boundary", async () => {
+    const calldata = clients({ allowance: 10n })
+    const calldataDeps = dependencies(calldata)
+    calldataDeps.refreshQuote = async (planned) => ({
+      ...planned,
+      data: "0x02",
+    })
+    await executeSquidFunding(input(), calldataDeps)
+    expect(calldata.calls.sent[0]).toEqual(
+      expect.objectContaining({ data: "0x02" }),
+    )
+
+    const expired = clients({ allowance: 10n })
+    let clock = 0
+    const estimate = expired.source.estimateGas.bind(expired.source)
+    expired.source.estimateGas = async (request) => {
+      const result = await estimate(request)
+      clock = quote().expiresAt * 1_000
+      return result
+    }
+    const expiredDeps = dependencies(expired)
+    expiredDeps.now = () => clock
+    await expect(executeSquidFunding(input(), expiredDeps)).rejects.toThrow(
+      "trust checks",
+    )
+    expect(expired.calls.send).toBe(0)
+  })
+
+  it("fails closed for provider failure, pending nonce, and wallet drift", async () => {
+    const failed = clients({ allowance: 10n })
+    const failedDeps = dependencies(failed)
+    failedDeps.status = async () => "failed"
+    await expect(executeSquidFunding(input(), failedDeps)).rejects.toThrow(
+      "Squid route failed",
+    )
+    expect(failed.calls.send).toBe(1)
+
+    const pending = clients({ allowance: 10n })
+    pending.source.getTransactionCount = async ({ blockTag }) =>
+      blockTag === "latest" ? 7 : 8
+    await expect(
+      executeSquidFunding(input(), dependencies(pending)),
+    ).rejects.toThrow("pending transactions")
+    expect(pending.calls.send).toBe(0)
+
+    const drift = clients({ allowance: 10n })
+    let walletReads = 0
+    drift.wallet.getChainId = async () => (walletReads++ === 0 ? 1 : 10)
+    await expect(
+      executeSquidFunding(input(), dependencies(drift)),
+    ).rejects.toThrow("Wallet chain")
+    expect(drift.calls.send).toBe(0)
+  })
+
+  it("does not rebroadcast a successful first leg after the second fails", async () => {
+    const first = quote()
+    const second = quote({
+      requirement: { ...first.requirement, id: "second" },
+    })
+    const mocked = clients({
+      allowance: 10n,
+      destinationBalances: [0n, 10n, 10n, 20n],
+    })
+    const deps = dependencies(mocked)
+    let statuses = 0
+    deps.status = async () => (statuses++ === 0 ? "success" : "failed")
+    await expect(
+      executeSquidFunding(
+        { ...input([first, second]), maxSourceAmount: 20n },
+        deps,
+      ),
+    ).rejects.toThrow("Squid route failed")
+    expect(mocked.calls.send).toBe(2)
+    expect(statuses).toBe(2)
   })
 
   it("requires source receipt, Squid status, and destination balance", async () => {
