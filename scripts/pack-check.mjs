@@ -17,12 +17,9 @@ function pnpm(args, options = {}) {
 
 function npm(args, options = {}) {
   if (process.platform !== "win32") return execFileSync("npm", args, options)
-  const command = ["npm.cmd", ...args]
-    .map((argument) => `"${argument.replaceAll('"', '""')}"`)
-    .join(" ")
   return execFileSync(
     process.env.ComSpec ?? "cmd.exe",
-    ["/d", "/s", "/c", command],
+    ["/d", "/c", "npm.cmd", ...args],
     options,
   )
 }
