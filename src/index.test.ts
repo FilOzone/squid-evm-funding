@@ -203,42 +203,6 @@ describe("Squid catalog and planner", () => {
     expect(result.approvalSpender).toBe(target)
   })
 
-  it("accepts legacy gasPrice routes with a usable compatible fee", async () => {
-    const source = resolveSourceToken(
-      parseSquidCatalog(chains, tokens),
-      1,
-      "USDC",
-    )
-    const original = routeFetch((amount) => amount).fetch
-    const fetch = (async (url, init) => {
-      const response = await original(url, init)
-      const body = (await response.json()) as {
-        route: { transactionRequest: Record<string, string> }
-      }
-      delete body.route.transactionRequest.maxFeePerGas
-      body.route.transactionRequest.gasPrice = "7"
-      return new Response(JSON.stringify(body))
-    }) as typeof globalThis.fetch
-    const result = await quoteSquidRoute(
-      {
-        owner,
-        source,
-        requirement: {
-          id: "fund",
-          chainId: 314,
-          token: destination,
-          amount: 1n,
-          recipient: owner,
-        },
-        sourceAmount: 1n,
-        slippage: 1,
-      },
-      { integratorId: "test", fetch, now: () => 0 },
-    )
-    expect(result.maxFeePerGas).toBe(7n)
-    expect(result.gasPrice).toBe(7n)
-  })
-
   it("rejects a multi-leg plan when an early route expires before return", async () => {
     const source = resolveSourceToken(
       parseSquidCatalog(chains, tokens),
@@ -524,44 +488,6 @@ describe("Squid catalog and planner", () => {
         { integratorId: "test", fetch, now: () => 0 },
       ),
     ).rejects.toThrow("0.01")
-  })
-
-  it("normalizes unsafe route-duration metadata to zero", async () => {
-    const source = resolveSourceToken(
-      parseSquidCatalog(chains, tokens),
-      1,
-      "USDC",
-    )
-    const mocked = routeFetch((input) => input)
-    const original = mocked.fetch
-    mocked.fetch = (async (url, init) => {
-      const response = await original(url, init)
-      const body = (await response.json()) as {
-        route: { estimate: { estimatedRouteDuration: number } }
-      }
-      body.route.estimate.estimatedRouteDuration = 1.5
-      return new Response(JSON.stringify(body))
-    }) as typeof globalThis.fetch
-    const quotes = await planSquidFunding(
-      {
-        owner,
-        source,
-        requirements: [
-          {
-            id: "one",
-            chainId: 314,
-            token: destination,
-            amount: 1n,
-            recipient: owner,
-          },
-        ],
-        maxSourceAmount: 1n,
-        initialSourceAmount: 1n,
-        slippage: 1,
-      },
-      { integratorId: "test", fetch: mocked.fetch, now: () => 0 },
-    )
-    expect(quotes[0]?.estimatedRouteDurationSeconds).toBe(0)
   })
 
   it("only rewrites an explicit provider minimum after downscaling", async () => {

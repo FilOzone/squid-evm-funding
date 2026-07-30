@@ -36,9 +36,7 @@ function quote(overrides: Partial<SquidQuote> = {}): SquidQuote {
     data: "0x01",
     value: 0n,
     gasLimit: 1n,
-    maxFeePerGas: 1n,
     expiresAt: 2_000_000_000,
-    estimatedRouteDurationSeconds: 1,
     ...overrides,
   }
 }

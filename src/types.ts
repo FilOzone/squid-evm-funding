@@ -37,11 +37,7 @@ export interface SquidQuote {
   data: Hex
   value: bigint
   gasLimit: bigint
-  maxFeePerGas: bigint
-  /** Legacy routes expose gasPrice; maxFeePerGas remains the usable compatible value. */
-  gasPrice?: bigint
   expiresAt: number
-  estimatedRouteDurationSeconds: number
 }
 
 export interface SquidCatalog {

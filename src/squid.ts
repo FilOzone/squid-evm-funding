@@ -14,14 +14,12 @@ type RouteWire = {
   route?: {
     quoteId?: string
     params?: Record<string, unknown>
-    estimate?: { toAmountMin?: string; estimatedRouteDuration?: number }
+    estimate?: { toAmountMin?: string }
     transactionRequest?: {
       target?: string
       data?: string
       value?: string
       gasLimit?: string
-      maxFeePerGas?: string
-      gasPrice?: string
       expiry?: string
       requestId?: string
       approvalSpender?: string
@@ -240,7 +238,6 @@ export async function quoteSquidRoute(
     transaction.approvalSpender == null
       ? undefined
       : address(transaction.approvalSpender, "approval spender")
-  const estimatedRouteDuration = route.estimate?.estimatedRouteDuration
   return {
     id: route.quoteId,
     ...(transaction.requestId == null
@@ -261,20 +258,7 @@ export async function quoteSquidRoute(
     data: transaction.data as Hex,
     value: amount(transaction.value ?? "0", "value"),
     gasLimit: amount(transaction.gasLimit, "gas limit"),
-    maxFeePerGas: amount(
-      transaction.maxFeePerGas ?? transaction.gasPrice,
-      "max fee per gas or legacy gas price",
-    ),
-    ...(transaction.gasPrice == null
-      ? {}
-      : { gasPrice: amount(transaction.gasPrice, "legacy gas price") }),
     expiresAt,
-    estimatedRouteDurationSeconds:
-      typeof estimatedRouteDuration === "number" &&
-      Number.isSafeInteger(estimatedRouteDuration) &&
-      estimatedRouteDuration > 0
-        ? estimatedRouteDuration
-        : 0,
   }
 }
 
