@@ -56,29 +56,6 @@ export interface SquidClientOptions {
   now?: () => number
 }
 
-export interface SquidExecutionStep {
-  kind: "approval" | "approval-reset" | "route"
-  requirementId: string
-  attempt: number
-  nativeFee: bigint
-  from: Address
-  to: Address
-  dataHash: Hash
-  value: bigint
-  nonce: number
-  gas: bigint
-  maxFeePerGas?: bigint
-  maxPriorityFeePerGas?: bigint
-  gasPrice?: bigint
-  destinationMinimum?: bigint
-  quoteId?: string
-  requestId?: string
-  fromChainId?: number
-  toChainId?: number
-  transactionHash?: Hash
-  receiptStatus?: "success" | "reverted"
-}
-
 export interface SquidStatusReference {
   quoteId: string
   requestId?: string
@@ -86,11 +63,10 @@ export interface SquidStatusReference {
   toChainId: number
 }
 
-/** One authenticated, non-sensitive checkpoint. An intent without a hash is deliberately not resumable. */
-export interface SquidExecutionCheckpoint {
-  executionId: string
-  steps: readonly SquidExecutionStep[]
-  integrity: Hash
+export interface SquidExecutionResult {
+  sourceAmount: bigint
+  nativeFee: bigint
+  routes: readonly { requirementId: string; transactionHash: Hash }[]
 }
 
 export type SquidPublicClient = Pick<

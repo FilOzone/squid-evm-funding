@@ -93,45 +93,45 @@ describe("Squid catalog and planner", () => {
     ).toThrow("invalid decimals")
   })
 
-  it("accepts provider-native display and unit aliases", () => {
-    const celo = [
+  it("keeps native aliases on the eight selected source chains", () => {
+    const filecoin = [
       {
-        chainId: "42220",
+        chainId: "314",
         type: "evm",
-        networkName: "Celo",
-        nativeCurrency: { symbol: "CELO", decimals: 18 },
+        networkName: "Filecoin",
+        nativeCurrency: { symbol: "FIL", decimals: 18 },
       },
     ]
-    const catalog = parseSquidCatalog(celo, [
+    const catalog = parseSquidCatalog(filecoin, [
       {
-        chainId: "42220",
+        chainId: "314",
         address: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-        symbol: "CELO.native",
+        symbol: "FIL.native",
         decimals: 18,
       },
     ])
-    expect(resolveSourceToken(catalog, 42220, "native").symbol).toBe(
-      "CELO.native",
-    )
-    const hedera = parseSquidCatalog(
+    expect(resolveSourceToken(catalog, 314, "native").symbol).toBe("FIL.native")
+    const filtered = parseSquidCatalog(
       [
         {
-          chainId: "295",
+          chainId: "42220",
           type: "evm",
-          networkName: "Hedera",
-          nativeCurrency: { symbol: "HBAR", decimals: 18 },
+          networkName: "Celo",
+          nativeCurrency: { symbol: "CELO", decimals: 18 },
         },
       ],
       [
         {
-          chainId: "295",
+          chainId: "42220",
           address: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-          symbol: "HBAR",
-          decimals: 8,
+          symbol: "CELO",
+          decimals: 18,
         },
       ],
     )
-    expect(resolveSourceToken(hedera, 295, "native").decimals).toBe(8)
+    expect(() => resolveSourceToken(filtered, 42220, "native")).toThrow(
+      "does not support",
+    )
   })
 
   it("fetches both current Squid catalogs with the integrator ID", async () => {
