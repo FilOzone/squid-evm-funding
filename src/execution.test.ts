@@ -192,7 +192,7 @@ describe("stateless guarded Squid execution", () => {
     }
   })
 
-  it("rejects a non-callable status and a disappeared planned spender before sending", async () => {
+  it("rejects invalid status configuration and a disappeared planned spender before sending", async () => {
     const invalidStatus = clients()
     await expect(
       executeSquidFunding(input(), {
@@ -201,6 +201,19 @@ describe("stateless guarded Squid execution", () => {
       }),
     ).rejects.toThrow("status callback")
     expect(invalidStatus.calls.send).toBe(0)
+
+    const blankBaseUrl = clients()
+    blankBaseUrl.source.getChainId = async () => {
+      throw new Error("RPC should not be called")
+    }
+    await expect(
+      executeSquidFunding(input(), {
+        ...dependencies(blankBaseUrl),
+        status: undefined,
+        squidStatusOptions: { integratorId: "test", baseUrl: "  " },
+      }),
+    ).rejects.toThrow("status options")
+    expect(blankBaseUrl.calls.send).toBe(0)
 
     const missingSpender = clients({ allowance: 10n })
     const planned = quote({ approvalSpender: spender })
@@ -269,6 +282,31 @@ describe("stateless guarded Squid execution", () => {
           ...input([first, second]),
           maxSourceAmount: 20n,
           maxNativeFee: 10n,
+        },
+        dependencies(mocked),
+      ),
+    ).rejects.toThrow("total-native-fee cap")
+    expect(mocked.calls.send).toBe(1)
+  })
+
+  it("stops a second OP Stack route at the cumulative total-fee cap", async () => {
+    const first = quote()
+    const second = quote({
+      requirement: { ...first.requirement, id: "second" },
+    })
+    const mocked = clients({
+      allowance: 10n,
+      totalFee: 4n,
+      destinationBalances: [0n, 10n, 10n, 20n],
+    })
+    await expect(
+      executeSquidFunding(
+        {
+          ...input([first, second]),
+          maxSourceAmount: 20n,
+          maxNativeFee: 7n,
+          feeMode: "op-stack",
+          opStackFeeBuffer: (fee) => fee,
         },
         dependencies(mocked),
       ),
@@ -392,7 +430,7 @@ describe("stateless guarded Squid execution", () => {
     expect(drift.calls.send).toBe(0)
   })
 
-  it("does not rebroadcast a successful first leg after the second fails", async () => {
+  it("surfaces second-leg failure after first-leg success", async () => {
     const first = quote()
     const second = quote({
       requirement: { ...first.requirement, id: "second" },

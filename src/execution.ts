@@ -37,7 +37,8 @@ function validStatusOptions(value: unknown): value is SquidClientOptions {
   return (
     typeof options.integratorId === "string" &&
     options.integratorId.trim() !== "" &&
-    (options.baseUrl === undefined || typeof options.baseUrl === "string") &&
+    (options.baseUrl === undefined ||
+      (typeof options.baseUrl === "string" && options.baseUrl.trim() !== "")) &&
     (options.fetch === undefined || typeof options.fetch === "function")
   )
 }
