@@ -72,7 +72,7 @@ try {
       "--eval",
       [
         'const packageRoot = await import("squid-evm-funding")',
-        'const expected = ["NATIVE_TOKEN_ADDRESS", "SquidMinimumAmountError", "executeSquidFunding", "fetchSquidCatalog", "fetchSquidStatus", "parseSquidCatalog", "parseSquidStatus", "planSquidFunding", "quoteSquidRoute", "resolveSourceToken", "sealSquidExecutionCheckpoint"]',
+        'const expected = ["NATIVE_TOKEN_ADDRESS", "SquidMinimumAmountError", "executeSquidFunding", "fetchSquidCatalog", "fetchSquidStatus", "parseSquidCatalog", "parseSquidStatus", "planSquidFunding", "quoteSquidRoute", "resolveSourceToken"]',
         "const actual = Object.keys(packageRoot).sort()",
         'if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error("unexpected root exports: " + actual.join(", "))',
       ].join("\n"),

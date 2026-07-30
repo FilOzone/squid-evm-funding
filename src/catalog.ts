@@ -20,6 +20,17 @@ interface TokenWire {
   decimals?: number
 }
 
+const SUPPORTED_SOURCE_CHAIN_IDS = new Set([
+  314, // Filecoin
+  42161, // Arbitrum
+  1, // Ethereum
+  8453, // Base
+  10, // Optimism
+  137, // Polygon
+  43114, // Avalanche
+  56, // BNB Chain
+])
+
 function invalid(message: string): never {
   throw new Error(`Invalid Squid catalog: ${message}`)
 }
@@ -64,6 +75,7 @@ export function parseSquidCatalog(
   for (const raw of chainsResponse as ChainWire[]) {
     if (raw == null || typeof raw !== "object" || raw.type !== "evm") continue
     const id = chainId(raw.chainId, "chain")
+    if (!SUPPORTED_SOURCE_CHAIN_IDS.has(id)) continue
     if (chains.has(id)) invalid(`chain ${id} is duplicated`)
     if (typeof raw.networkName !== "string" || raw.networkName.trim() === "")
       invalid(`chain ${id} is missing networkName`)

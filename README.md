@@ -18,15 +18,15 @@ pnpm add squid-evm-funding viem
   destination EVM chain.
 - **Source:** the chain and token the caller permits Squid to spend.
 - **Quote:** one validated, fixed-input Squid route for one requirement.
-- **Operation:** one stable logical execution, identified by `operationId` and
-  resumed from an authenticated checkpoint.
+- **Execution:** one guarded call that plans, validates, broadcasts, verifies,
+  and returns transaction hashes.
 
 ## Plan and execute a route
 
 The caller owns the account, RPC URLs, integrator ID, trust policy, caps, and
-checkpoint storage. This example uses Arbitrum USDC as the source and Filecoin
-USDFC as the destination, but the package itself accepts Squid-supported EVM
-chains and tokens.
+trusted contract addresses. This example uses Arbitrum USDC as the source and Filecoin
+USDFC as the destination. Source selection is limited to Filecoin, Arbitrum,
+Ethereum, Base, Optimism, Polygon, Avalanche, and BNB Chain.
 
 ```ts
 import {
@@ -35,7 +35,6 @@ import {
   planSquidFunding,
   quoteSquidRoute,
   resolveSourceToken,
-  type SquidExecutionCheckpoint,
 } from "squid-evm-funding"
 import {
   createPublicClient,
@@ -56,7 +55,6 @@ declare const integratorId: string
 declare const usdfcAddress: Address
 declare const squidRouterAddress: Address
 declare const squidApprovalSpender: Address
-declare const checkpointIntegrityKey: Hex
 
 const account = privateKeyToAccount(sourcePrivateKey)
 const sourcePublicClient = createPublicClient({
@@ -98,12 +96,8 @@ const quotes = await planSquidFunding(
   squid,
 )
 
-// Demo only. Use durable, monotonic storage before routing real funds.
-let checkpoint: SquidExecutionCheckpoint | undefined
 const result = await executeSquidFunding(
   {
-    operationId: "fund-filecoin-pay-2026-07-28-01",
-    checkpointIntegrityKey,
     account: account.address,
     source,
     quotes,
@@ -138,19 +132,13 @@ const result = await executeSquidFunding(
         squid,
       ),
     squidStatusOptions: squid,
-    load: async () => checkpoint,
-    save: async (next) => {
-      checkpoint = next
-    },
   },
 )
 ```
 
-`sourcePrivateKey`, RPC URLs, token and trusted contract addresses,
-`integratorId`, and `checkpointIntegrityKey` above are application-owned
-configuration. The package never reads them from the environment. The in-memory
-checkpoint store is only enough to make the flow visible; it is not safe for a
-real transfer.
+`sourcePrivateKey`, RPC URLs, token and trusted contract addresses, and
+`integratorId` above are application-owned configuration. The package never
+reads them from the environment.
 
 ## Public API
 
@@ -170,15 +158,14 @@ real transfer.
   previously fetched Squid status response.
 - `executeSquidFunding` refreshes and validates routes, sends exact ERC-20
   approvals when needed, sends route transactions, polls bounded completion,
-  and confirms the destination balance. It returns the final checkpoint.
-- `sealSquidExecutionCheckpoint` authenticates a checkpoint after the caller
-  has manually reconciled an interrupted send.
+  and confirms the destination balance. It returns source amount, total native
+  fee, and route transaction hashes.
 
 The exported types are `DestinationRequirement`, `SourceToken`, `SquidCatalog`,
-`SquidChain`, `SquidClientOptions`, `SquidExecutionCheckpoint`,
-`SquidExecutionStep`, `SquidPublicClient`, `SquidQuote`,
+`SquidChain`, `SquidClientOptions`, `SquidExecutionResult`,
+`SquidPublicClient`, `SquidQuote`,
 `SquidStatusReference`, and `SquidWalletClient`. Applications can therefore
-implement clients, status callbacks, and checkpoint stores without importing
+implement clients and status callbacks without importing
 internal modules.
 
 ## Execution constraints
@@ -212,36 +199,9 @@ Provide either a custom `status` callback or `squidStatusOptions`. A callable
 `status` callback takes precedence when both are present. Otherwise valid Squid
 options are required and the built-in status request is used.
 
-## Checkpoints and recovery
+## Interrupted executions
 
-Use one nonblank, stable `operationId` for one logical execution and all its
-retries. It is bound to the account, source identity, destination requirements,
-planned source amounts, trusted addresses, and fee mode. Changing those inputs
-or reusing a checkpoint for a different operation is rejected.
-
-Generate and retain a separate 32-byte `checkpointIntegrityKey`. It is an HMAC
-key, not the wallet private key, and it must not be stored beside the
-checkpoint. A checkpoint contains execution metadata such as addresses, nonces,
-fee commitments, transaction hashes, and calldata hashes; it contains neither
-key. Authentication detects edits but does not encrypt a checkpoint or prove it
-is the newest valid version. Treat the checkpoint as application operational
-data even though it contains no signing or integrity secret.
-
-`load` and `save` therefore need durable, atomic, monotonically advancing
-storage. A valid older checkpoint can omit a later send, so storage rollback can
-create duplicate-spend risk even though its HMAC is valid. Persist every saved
-checkpoint before allowing the operation to continue, and preserve `bigint`
-values when serializing it.
-
-If execution stops after saving an intent but before saving its transaction
-hash, it will not guess or resubmit. Reconcile the wallet and source chain
-manually:
-
-1. If the transaction was broadcast, attach its recovered hash to the matching
-   step. If it is proven unsent, remove that hashless step.
-2. Call `sealSquidExecutionCheckpoint` with the same integrity key.
-3. Durably save the sealed checkpoint, then resume with the same operation and
-   execution inputs.
-
-The sealer authenticates the caller's reconciliation decision; it does not
-inspect the chain or decide whether a transaction was sent.
+The executor is intentionally stateless. An interruption can leave the
+destination ambiguous, so the host must record one coarse in-progress marker
+around the call and require manual verification before another run. It never
+replays, reconstructs, or resumes a prior transaction.
