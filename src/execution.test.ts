@@ -163,6 +163,27 @@ describe("stateless guarded Squid execution", () => {
     )
   })
 
+  it("estimates without quoted gas and uses a larger estimate", async () => {
+    const mocked = clients({ allowance: 10n })
+    let estimateRequest: unknown
+    mocked.source.estimateGas = async (request) => {
+      estimateRequest = request
+      return 5n
+    }
+    await executeSquidFunding(input(), dependencies(mocked))
+    expect(estimateRequest).toEqual(
+      expect.objectContaining({
+        account,
+        to: target,
+        data: "0x01",
+        value: 0n,
+        nonce: 7,
+      }),
+    )
+    expect(estimateRequest).not.toHaveProperty("gas")
+    expect(mocked.calls.sent[0]).toEqual(expect.objectContaining({ gas: 5n }))
+  })
+
   it("resets an overbroad allowance before setting the exact route amount", async () => {
     const mocked = clients({ allowance: 20n })
     await executeSquidFunding(input(), dependencies(mocked))
@@ -376,7 +397,7 @@ describe("stateless guarded Squid execution", () => {
     expect(result.routes).toHaveLength(1)
   })
 
-  it("uses refreshed calldata and rechecks expiry at the broadcast boundary", async () => {
+  it("uses refreshed calldata and rechecks expiry after async preflight", async () => {
     const calldata = clients({ allowance: 10n })
     const calldataDeps = dependencies(calldata)
     calldataDeps.refreshQuote = async (planned) => ({

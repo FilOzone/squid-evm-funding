@@ -103,7 +103,12 @@ async function prepare(
   feeMode: "standard" | "op-stack",
   buffer: ((totalFee: bigint) => bigint) | undefined,
 ) {
-  const base = { ...transaction, nonce }
+  const base = {
+    to: transaction.to,
+    data: transaction.data,
+    value: transaction.value,
+    nonce,
+  }
   const [estimatedGas, fees] = await Promise.all([
     client.estimateGas({ account, ...base }),
     client.estimateFeesPerGas(),
