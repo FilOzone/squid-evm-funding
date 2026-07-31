@@ -1,17 +1,5 @@
 import type { Address } from "viem"
-import {
-  NATIVE_TOKEN_ADDRESS,
-  type SourceToken,
-  type SquidCatalog,
-  type SquidChain,
-} from "./types.js"
-
-interface ChainWire {
-  chainId?: string | number
-  networkName?: string
-  type?: string
-  nativeCurrency?: { symbol?: string; decimals?: number }
-}
+import { NATIVE_TOKEN_ADDRESS, type SourceToken } from "./types.js"
 
 interface TokenWire {
   chainId?: string | number
@@ -20,31 +8,8 @@ interface TokenWire {
   decimals?: number
 }
 
-const SUPPORTED_SOURCE_CHAIN_IDS = new Set([
-  314, // Filecoin
-  42161, // Arbitrum
-  1, // Ethereum
-  8453, // Base
-  10, // Optimism
-  137, // Polygon
-  43114, // Avalanche
-  56, // BNB Chain
-])
-
 function invalid(message: string): never {
-  throw new Error(`Invalid Squid catalog: ${message}`)
-}
-
-function chainId(value: unknown, label: string): number {
-  const parsed =
-    typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value
-  if (
-    typeof parsed !== "number" ||
-    !Number.isSafeInteger(parsed) ||
-    parsed <= 0
-  )
-    invalid(`${label} has an invalid chainId`)
-  return parsed
+  throw new Error(`Invalid Squid token catalog: ${message}`)
 }
 
 function address(value: unknown, label: string): Address {
@@ -53,109 +18,88 @@ function address(value: unknown, label: string): Address {
   return value.toLowerCase() as Address
 }
 
-function decimals(value: unknown, label: string): number {
+export function parseSourceTokens(
+  response: unknown,
+  sourceChainId: number,
+): SourceToken[] {
   if (
-    typeof value !== "number" ||
-    !Number.isSafeInteger(value) ||
-    value < 0 ||
-    value > 255
+    response == null ||
+    typeof response !== "object" ||
+    !Array.isArray((response as { tokens?: unknown }).tokens)
   )
-    invalid(`${label} has invalid decimals`)
-  return value
-}
+    invalid("tokens must be an array")
 
-/** Parse all EVM catalog entries. A malformed EVM entry is rejected before it can authorize a route. */
-export function parseSquidCatalog(
-  chainsResponse: unknown,
-  tokensResponse: unknown,
-): SquidCatalog {
-  if (!Array.isArray(chainsResponse) || !Array.isArray(tokensResponse))
-    invalid("chains and tokens must be arrays")
-  const chains = new Map<number, SquidChain>()
-  for (const raw of chainsResponse as ChainWire[]) {
-    if (raw == null || typeof raw !== "object" || raw.type !== "evm") continue
-    const id = chainId(raw.chainId, "chain")
-    if (!SUPPORTED_SOURCE_CHAIN_IDS.has(id)) continue
-    if (chains.has(id)) invalid(`chain ${id} is duplicated`)
-    if (typeof raw.networkName !== "string" || raw.networkName.trim() === "")
-      invalid(`chain ${id} is missing networkName`)
-    if (
-      typeof raw.nativeCurrency?.symbol !== "string" ||
-      raw.nativeCurrency.symbol.trim() === ""
-    )
-      invalid(`chain ${id} is missing native symbol`)
-    decimals(raw.nativeCurrency.decimals, `chain ${id}`)
-    chains.set(id, { chainId: id, networkName: raw.networkName.trim() })
-  }
   const tokens: SourceToken[] = []
   const identities = new Set<string>()
-  for (const raw of tokensResponse as TokenWire[]) {
+  for (const raw of (response as { tokens: TokenWire[] }).tokens) {
     if (raw == null || typeof raw !== "object") continue
-    const id =
+    const chainId =
       typeof raw.chainId === "string" && /^\d+$/.test(raw.chainId)
         ? Number(raw.chainId)
         : raw.chainId
-    if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) continue
-    const chain = chains.get(id)
-    if (chain == null) continue
+    if (chainId !== sourceChainId) continue
     if (typeof raw.symbol !== "string" || raw.symbol.trim() === "")
-      invalid(`token on ${id} is missing symbol`)
-    const token = address(raw.address, `token ${raw.symbol} on ${id}`)
-    const native = token === NATIVE_TOKEN_ADDRESS
-    const tokenDecimals = decimals(raw.decimals, `token ${raw.symbol} on ${id}`)
-    const identity = `${id}:${token}`
-    if (identities.has(identity))
-      invalid(`token ${token} on ${id} is duplicated`)
-    identities.add(identity)
+      invalid(`token on ${sourceChainId} is missing symbol`)
+    if (
+      typeof raw.decimals !== "number" ||
+      !Number.isSafeInteger(raw.decimals) ||
+      raw.decimals < 0 ||
+      raw.decimals > 255
+    )
+      invalid(`token ${raw.symbol} on ${sourceChainId} has invalid decimals`)
+    const token = address(
+      raw.address,
+      `token ${raw.symbol} on ${sourceChainId}`,
+    )
+    if (identities.has(token))
+      invalid(`token ${token} on ${sourceChainId} is duplicated`)
+    identities.add(token)
     tokens.push({
-      chain,
+      chainId: sourceChainId,
       token,
       symbol: raw.symbol.trim(),
-      decimals: tokenDecimals,
-      native,
+      decimals: raw.decimals,
     })
   }
-  return { chains, tokens }
+  return tokens
 }
 
 export function resolveSourceToken(
-  catalog: SquidCatalog,
-  chainId: number,
+  tokens: readonly SourceToken[],
+  sourceChainId: number,
   selector: string,
 ): SourceToken {
-  const chain = catalog.chains.get(chainId)
-  if (chain == null)
-    throw new Error(`Squid does not support EVM chain ${chainId}`)
-  const candidates = catalog.tokens.filter(
-    (token) => token.chain.chainId === chainId,
-  )
-  if (selector.trim().toLowerCase() === "native") {
-    const native = candidates.filter((token) => token.native)
+  const candidates = tokens.filter((token) => token.chainId === sourceChainId)
+  const normalized = selector.trim().toLowerCase()
+  if (normalized === "native") {
+    const native = candidates.filter(
+      (token) => token.token === NATIVE_TOKEN_ADDRESS,
+    )
     if (native.length !== 1)
       throw new Error(
-        `Squid catalog has no unambiguous native token for chain ${chainId}`,
+        `Squid token catalog has no unambiguous native token for chain ${sourceChainId}`,
       )
     return native[0] as SourceToken
   }
-  if (/^0x[0-9a-fA-F]{40}$/.test(selector.trim())) {
+  if (/^0x[0-9a-fA-F]{40}$/.test(normalized)) {
     const exact = candidates.find(
-      (token) => token.token.toLowerCase() === selector.trim().toLowerCase(),
+      (token) => token.token.toLowerCase() === normalized,
     )
     if (exact == null)
       throw new Error(
-        `Source token address is not supported on chain ${chainId}`,
+        `Source token address is not supported on chain ${sourceChainId}`,
       )
     return exact
   }
   const matches = candidates.filter(
-    (token) => token.symbol.toLowerCase() === selector.trim().toLowerCase(),
+    (token) => token.symbol.toLowerCase() === normalized,
   )
   if (matches.length === 1) return matches[0] as SourceToken
   if (matches.length > 1)
     throw new Error(
-      `Source token symbol ${selector} is ambiguous on chain ${chainId}; use its address`,
+      `Source token symbol ${selector} is ambiguous on chain ${sourceChainId}; use its address`,
     )
   throw new Error(
-    `Source token ${selector} is not supported on chain ${chainId}`,
+    `Source token ${selector} is not supported on chain ${sourceChainId}`,
   )
 }

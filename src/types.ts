@@ -1,19 +1,20 @@
-import type { Address, Hash, Hex, PublicClient, WalletClient } from "viem"
+import type {
+  Account,
+  Address,
+  Hash,
+  Hex,
+  PublicClient,
+  WalletClient,
+} from "viem"
 
 export const NATIVE_TOKEN_ADDRESS =
   "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" as Address
 
-export interface SquidChain {
-  chainId: number
-  networkName: string
-}
-
 export interface SourceToken {
-  chain: SquidChain
+  chainId: number
   token: Address
   symbol: string
   decimals: number
-  native: boolean
 }
 
 export interface DestinationRequirement {
@@ -26,23 +27,22 @@ export interface DestinationRequirement {
 
 export interface SquidQuote {
   id: string
-  requestId?: string
   requirement: DestinationRequirement
-  source: SourceToken
   sourceAmount: bigint
   destinationAmount: bigint
   target: Address
-  /** Present only when Squid explicitly supplies a separate approval spender. */
   approvalSpender?: Address
   data: Hex
   value: bigint
-  gasLimit: bigint
   expiresAt: number
 }
 
-export interface SquidCatalog {
-  chains: ReadonlyMap<number, SquidChain>
-  tokens: readonly SourceToken[]
+export interface SquidFundingPlan {
+  owner: Address
+  source: SourceToken
+  quotes: readonly SquidQuote[]
+  maxSourceAmount: bigint
+  slippage: number
 }
 
 export interface SquidClientOptions {
@@ -50,13 +50,6 @@ export interface SquidClientOptions {
   baseUrl?: string
   fetch?: typeof globalThis.fetch
   now?: () => number
-}
-
-export interface SquidStatusReference {
-  quoteId: string
-  requestId?: string
-  fromChainId: number
-  toChainId: number
 }
 
 export interface SquidExecutionResult {
@@ -67,8 +60,6 @@ export interface SquidExecutionResult {
 
 export type SquidPublicClient = Pick<
   PublicClient,
-  | "estimateFeesPerGas"
-  | "estimateGas"
   | "getBalance"
   | "getChainId"
   | "getTransactionCount"
@@ -90,5 +81,5 @@ export type SquidPublicClient = Pick<
 
 export type SquidWalletClient = Pick<
   WalletClient,
-  "account" | "getAddresses" | "getChainId" | "sendTransaction"
->
+  "getChainId" | "prepareTransactionRequest" | "sendTransaction"
+> & { account: Account }
