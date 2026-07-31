@@ -1,9 +1,14 @@
-import type { Address } from "viem"
-import { quoteSquidRoute, SquidMinimumAmountError } from "./squid.js"
+import { type Address, parseUnits } from "viem"
+import { resolveSourceToken } from "./catalog.js"
+import {
+  fetchSourceTokens,
+  quoteSquidRoute,
+  SquidMinimumAmountError,
+} from "./squid.js"
 import type {
   DestinationRequirement,
-  SourceToken,
   SquidClientOptions,
+  SquidFundingPlan,
   SquidQuote,
 } from "./types.js"
 
@@ -16,23 +21,39 @@ function ceilDiv(numerator: bigint, denominator: bigint): bigint {
 export async function planSquidFunding(
   input: {
     owner: Address
-    source: SourceToken
+    sourceChainId: number
+    sourceToken: string
     requirements: readonly DestinationRequirement[]
-    maxSourceAmount: bigint
-    initialSourceAmount?: bigint
+    maxSourceAmount: string
     slippage: number
   },
   options: SquidClientOptions,
-): Promise<SquidQuote[]> {
-  if (input.maxSourceAmount <= 0n || input.requirements.length === 0)
-    throw new Error(
-      "A positive source cap and destination requirement are required",
-    )
-  const seed =
-    input.initialSourceAmount ??
-    5n * 10n ** BigInt(Math.max(0, input.source.decimals - 1))
+): Promise<SquidFundingPlan> {
+  if (
+    !Number.isSafeInteger(input.sourceChainId) ||
+    input.sourceChainId <= 0 ||
+    input.requirements.length === 0 ||
+    input.requirements.some((requirement) => requirement.amount <= 0n)
+  )
+    throw new Error("A source chain and destination requirement are required")
+
+  const source = resolveSourceToken(
+    await fetchSourceTokens(input.sourceChainId, options),
+    input.sourceChainId,
+    input.sourceToken,
+  )
+  let maxSourceAmount: bigint
+  try {
+    maxSourceAmount = parseUnits(input.maxSourceAmount, source.decimals)
+  } catch {
+    throw new Error("The source-token cap must be a decimal amount")
+  }
+  if (maxSourceAmount <= 0n)
+    throw new Error("The source-token cap must be positive")
+
+  const seed = 5n * 10n ** BigInt(Math.max(0, source.decimals - 1))
   const quotes: SquidQuote[] = []
-  let remaining = input.maxSourceAmount
+  let remaining = maxSourceAmount
   for (const requirement of input.requirements) {
     if (remaining <= 0n)
       throw new Error("Acquisition would exceed the source-token cap")
@@ -44,7 +65,7 @@ export async function planSquidFunding(
         quote = await quoteSquidRoute(
           {
             owner: input.owner,
-            source: input.source,
+            source,
             requirement,
             sourceAmount,
             slippage: input.slippage,
@@ -111,5 +132,11 @@ export async function planSquidFunding(
   const now = Math.floor((options.now ?? Date.now)() / 1000)
   if (quotes.some((quote) => quote.expiresAt <= now))
     throw new Error("A planned Squid route expired before planning completed")
-  return quotes
+  return {
+    owner: input.owner,
+    source,
+    quotes,
+    maxSourceAmount,
+    slippage: input.slippage,
+  }
 }

@@ -1,11 +1,10 @@
 import type { Address, Hash, Hex } from "viem"
-import { parseSquidCatalog } from "./catalog.js"
+import { parseSourceTokens } from "./catalog.js"
 import type {
   DestinationRequirement,
   SourceToken,
   SquidClientOptions,
   SquidQuote,
-  SquidStatusReference,
 } from "./types.js"
 
 const DEFAULT_BASE_URL = "https://v2.api.squidrouter.com/v2"
@@ -19,9 +18,7 @@ type RouteWire = {
       target?: string
       data?: string
       value?: string
-      gasLimit?: string
       expiry?: string
-      requestId?: string
       approvalSpender?: string
     }
   }
@@ -29,24 +26,13 @@ type RouteWire = {
 
 export class SquidMinimumAmountError extends Error {}
 
-export function parseSquidStatus(
-  value: unknown,
-): "pending" | "success" | "failed" {
-  const status =
-    value != null && typeof value === "object"
-      ? ((value as Record<string, unknown>).squidTransactionStatus ??
-        (value as Record<string, unknown>).status)
-      : undefined
-  if (typeof status !== "string")
-    throw new Error("Invalid Squid status response")
-  if (status.toLowerCase() === "success") return "success"
-  if (
-    ["failed", "refund", "needs_gas", "partial_success"].includes(
-      status.toLowerCase(),
-    )
-  )
-    return "failed"
-  return "pending"
+function client(options: SquidClientOptions) {
+  if (options.integratorId.trim() === "")
+    throw new Error("Squid integrator ID is required")
+  return {
+    fetch: options.fetch ?? globalThis.fetch,
+    baseUrl: options.baseUrl ?? DEFAULT_BASE_URL,
+  }
 }
 
 function address(value: unknown, label: string): Address {
@@ -92,50 +78,19 @@ function isMinimumMessage(message: string | undefined): boolean {
   )
 }
 
-function client(options: SquidClientOptions): {
-  fetch: typeof globalThis.fetch
-  baseUrl: string
-} {
-  if (options.integratorId.trim() === "")
-    throw new Error("Squid integrator ID is required")
-  return {
-    fetch: options.fetch ?? globalThis.fetch,
-    baseUrl: options.baseUrl ?? DEFAULT_BASE_URL,
-  }
-}
-
-/** Fetch the current Squid EVM chains and tokens with the supplied integrator ID. */
-export async function fetchSquidCatalog(options: SquidClientOptions) {
+export async function fetchSourceTokens(
+  sourceChainId: number,
+  options: SquidClientOptions,
+) {
   const configured = client(options)
-  const [chains, tokens] = await Promise.all(
-    ["chains", "tokens"].map(async (resource) => {
-      const response = await configured.fetch(
-        `${configured.baseUrl}/${resource}`,
-        {
-          headers: { "x-integrator-id": options.integratorId },
-        },
-      )
-      if (!response.ok)
-        throw new Error(`Squid ${resource} request failed (${response.status})`)
-      return response.json()
-    }),
-  )
-  if (
-    chains == null ||
-    typeof chains !== "object" ||
-    !Array.isArray((chains as { chains?: unknown }).chains) ||
-    tokens == null ||
-    typeof tokens !== "object" ||
-    !Array.isArray((tokens as { tokens?: unknown }).tokens)
-  )
-    throw new Error("Invalid Squid catalog response")
-  return parseSquidCatalog(
-    (chains as { chains: unknown[] }).chains,
-    (tokens as { tokens: unknown[] }).tokens,
-  )
+  const response = await configured.fetch(`${configured.baseUrl}/tokens`, {
+    headers: { "x-integrator-id": options.integratorId },
+  })
+  if (!response.ok)
+    throw new Error(`Squid tokens request failed (${response.status})`)
+  return parseSourceTokens(await response.json(), sourceChainId)
 }
 
-/** Quote one fixed source amount. This validates route identity but leaves target/spender trust policy to execution. */
 export async function quoteSquidRoute(
   input: {
     owner: Address
@@ -154,6 +109,7 @@ export async function quoteSquidRoute(
     input.slippage > 99.99
   )
     throw new Error("Squid slippage must be between 0.01 and 99.99")
+
   const configured = client(options)
   const response = await configured.fetch(`${configured.baseUrl}/route`, {
     method: "POST",
@@ -164,7 +120,7 @@ export async function quoteSquidRoute(
     body: JSON.stringify({
       fromAddress: input.owner,
       toAddress: input.requirement.recipient,
-      fromChain: String(input.source.chain.chainId),
+      fromChain: String(input.source.chainId),
       fromToken: input.source.token,
       fromAmount: input.sourceAmount.toString(),
       toChain: String(input.requirement.chainId),
@@ -195,6 +151,7 @@ export async function quoteSquidRoute(
       `Squid quote failed (${response.status})${message == null ? "" : `: ${message}`}`,
     )
   }
+
   const route = ((await response.json()) as RouteWire).route
   const transaction = route?.transactionRequest
   const params = route?.params
@@ -206,13 +163,7 @@ export async function quoteSquidRoute(
   )
     throw new Error("Invalid Squid route: missing route fields")
   if (
-    transaction.requestId != null &&
-    (typeof transaction.requestId !== "string" ||
-      transaction.requestId.trim() === "")
-  )
-    throw new Error("Invalid Squid route: request ID")
-  if (
-    params.fromChain !== String(input.source.chain.chainId) ||
+    params.fromChain !== String(input.source.chainId) ||
     params.fromAmount !== input.sourceAmount.toString() ||
     params.toChain !== String(input.requirement.chainId) ||
     params.slippage !== input.slippage ||
@@ -234,20 +185,14 @@ export async function quoteSquidRoute(
     !/^0x(?:[0-9a-fA-F]{2})+$/.test(transaction.data)
   )
     throw new Error("Invalid Squid route: calldata")
+
   const approvalSpender =
     transaction.approvalSpender == null
       ? undefined
       : address(transaction.approvalSpender, "approval spender")
   return {
     id: route.quoteId,
-    ...(transaction.requestId == null
-      ? response.headers.get("x-request-id") == null ||
-        response.headers.get("x-request-id")?.trim() === ""
-        ? {}
-        : { requestId: response.headers.get("x-request-id") as string }
-      : { requestId: transaction.requestId }),
     requirement: input.requirement,
-    source: input.source,
     sourceAmount: input.sourceAmount,
     destinationAmount: amount(
       route.estimate?.toAmountMin,
@@ -257,33 +202,46 @@ export async function quoteSquidRoute(
     ...(approvalSpender == null ? {} : { approvalSpender }),
     data: transaction.data as Hex,
     value: amount(transaction.value ?? "0", "value"),
-    gasLimit: amount(transaction.gasLimit, "gas limit"),
     expiresAt,
   }
 }
 
-/** Fetch and normalize the documented Squid v2 route-status response. */
 export async function fetchSquidStatus(
-  input: { status: SquidStatusReference; transactionHash: Hash },
+  input: {
+    quoteId: string
+    transactionHash: Hash
+    fromChainId: number
+    toChainId: number
+  },
   options: SquidClientOptions,
 ): Promise<"pending" | "success" | "failed"> {
   const configured = client(options)
   const query = new URLSearchParams({
     transactionId: input.transactionHash,
-    fromChainId: String(input.status.fromChainId),
-    toChainId: String(input.status.toChainId),
-    quoteId: input.status.quoteId,
-    ...(input.status.requestId == null
-      ? {}
-      : { requestId: input.status.requestId }),
+    fromChainId: String(input.fromChainId),
+    toChainId: String(input.toChainId),
+    quoteId: input.quoteId,
   })
   const response = await configured.fetch(
     `${configured.baseUrl}/status?${query}`,
-    {
-      headers: { "x-integrator-id": options.integratorId },
-    },
+    { headers: { "x-integrator-id": options.integratorId } },
   )
   if (!response.ok)
     throw new Error(`Squid status request failed (${response.status})`)
-  return parseSquidStatus(await response.json())
+  const value = await response.json()
+  const status =
+    value != null && typeof value === "object"
+      ? ((value as Record<string, unknown>).squidTransactionStatus ??
+        (value as Record<string, unknown>).status)
+      : undefined
+  if (typeof status !== "string")
+    throw new Error("Invalid Squid status response")
+  if (status.toLowerCase() === "success") return "success"
+  if (
+    ["failed", "refund", "needs_gas", "partial_success"].includes(
+      status.toLowerCase(),
+    )
+  )
+    return "failed"
+  return "pending"
 }

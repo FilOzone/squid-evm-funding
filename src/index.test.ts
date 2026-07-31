@@ -1,781 +1,322 @@
 import { describe, expect, it } from "vitest"
-import {
-  fetchSquidCatalog,
-  parseSquidCatalog,
-  parseSquidStatus,
-  planSquidFunding,
-  quoteSquidRoute,
-  resolveSourceToken,
-} from "./index.js"
+import * as library from "./index.js"
+import { NATIVE_TOKEN_ADDRESS, planSquidFunding } from "./index.js"
 
 const owner = "0x1111111111111111111111111111111111111111" as const
-const sourceAddress = "0x2222222222222222222222222222222222222222" as const
-const destination = "0x3333333333333333333333333333333333333333" as const
+const sourceToken = "0x2222222222222222222222222222222222222222" as const
+const destinationToken = "0x3333333333333333333333333333333333333333" as const
 const target = "0x4444444444444444444444444444444444444444" as const
+const spender = "0x5555555555555555555555555555555555555555" as const
 
-const chains = [
+type RouteRequest = {
+  fromAddress: string
+  toAddress: string
+  fromChain: string
+  fromToken: string
+  fromAmount: string
+  toChain: string
+  toToken: string
+  slippage: number
+  quoteOnly: boolean
+}
+
+const tokens = [
   {
     chainId: "1",
-    type: "evm",
-    networkName: "Ethereum",
-    nativeCurrency: { symbol: "ETH", decimals: 18 },
+    address: sourceToken,
+    symbol: "USDC",
+    decimals: 6,
   },
-]
-const tokens = [
-  { chainId: "1", address: sourceAddress, symbol: "USDC", decimals: 6 },
+  {
+    chainId: "1",
+    address: NATIVE_TOKEN_ADDRESS,
+    symbol: "ETH",
+    decimals: 18,
+  },
   { chainId: "osmosis-1", address: "uosmo", symbol: "OSMO", decimals: 6 },
 ]
 
-function routeFetch(
-  output: (input: bigint) => bigint,
-  approvalSpender?: string,
-) {
-  let calls = 0
-  const fetch = async (_url: string | URL | Request, init?: RequestInit) => {
-    calls += 1
-    const request = JSON.parse(String(init?.body)) as {
-      fromAmount: string
-      slippage: number
-    }
-    const fromAmount = BigInt(request.fromAmount)
-    return new Response(
-      JSON.stringify({
-        route: {
-          quoteId: `quote-${calls}`,
-          params: {
-            fromChain: "1",
-            fromToken: sourceAddress,
-            fromAmount: request.fromAmount,
-            fromAddress: owner,
-            toChain: "314",
-            toToken: destination,
-            toAddress: owner,
-            slippage: request.slippage,
-            quoteOnly: false,
-          },
-          estimate: { toAmountMin: output(fromAmount).toString() },
-          transactionRequest: {
-            target,
-            data: "0x01",
-            value: "0",
-            gasLimit: "1",
-            maxFeePerGas: "1",
-            expiry: "2000000000",
-            ...(approvalSpender == null ? {} : { approvalSpender }),
-          },
-        },
-      }),
-      { status: 200 },
-    )
+function requirement(id = "fund", amount = 10n) {
+  return {
+    id,
+    chainId: 314,
+    token: destinationToken,
+    amount,
+    recipient: owner,
   }
-  return { fetch: fetch as typeof globalThis.fetch, calls: () => calls }
 }
 
-describe("Squid catalog and planner", () => {
-  it("accepts arbitrary tokens on every selected source chain", () => {
-    const chainIds = [314, 42161, 1, 8453, 10, 137, 43114, 56]
-    const catalog = parseSquidCatalog(
-      chainIds.map((chainId) => ({
-        chainId: String(chainId),
-        type: "evm",
-        networkName: `chain-${chainId}`,
-        nativeCurrency: { symbol: "NATIVE", decimals: 18 },
-      })),
-      chainIds.map((chainId, index) => ({
-        chainId: String(chainId),
-        address: `0x${(index + 1).toString(16).padStart(40, "0")}`,
-        symbol: `T${index}`,
-        decimals: 6,
-      })),
-    )
-    expect(catalog.chains.size).toBe(8)
-    for (const [index, chainId] of chainIds.entries())
-      expect(
-        resolveSourceToken(catalog, chainId, `T${index}`).chain.chainId,
-      ).toBe(chainId)
-  })
-
-  it("rejects ambiguous source symbols", () => {
-    const catalog = parseSquidCatalog(chains, [
-      ...tokens,
-      { chainId: "1", address: target, symbol: "USDC", decimals: 6 },
-    ])
-    expect(() => resolveSourceToken(catalog, 1, "USDC")).toThrow("ambiguous")
-  })
-
-  it("rejects malformed token decimals", () => {
-    expect(() =>
-      parseSquidCatalog(chains, [
-        {
-          chainId: "1",
-          address: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-          symbol: "ETH",
-          decimals: -1,
-        },
-      ]),
-    ).toThrow("invalid decimals")
-  })
-
-  it("keeps native aliases on the eight selected source chains", () => {
-    const filecoin = [
-      {
-        chainId: "314",
-        type: "evm",
-        networkName: "Filecoin",
-        nativeCurrency: { symbol: "FIL", decimals: 18 },
+function route(
+  request: RouteRequest,
+  output = BigInt(request.fromAmount),
+  mutate?: (value: Record<string, unknown>) => void,
+) {
+  const value: Record<string, unknown> = {
+    route: {
+      quoteId: `quote-${request.fromAmount}`,
+      params: { ...request },
+      estimate: { toAmountMin: output.toString() },
+      transactionRequest: {
+        target,
+        approvalSpender: spender,
+        data: "0x01",
+        value:
+          request.fromToken === NATIVE_TOKEN_ADDRESS ? request.fromAmount : "0",
+        expiry: "2000000000",
       },
-    ]
-    const catalog = parseSquidCatalog(filecoin, [
-      {
-        chainId: "314",
-        address: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-        symbol: "FIL.native",
-        decimals: 18,
-      },
-    ])
-    expect(resolveSourceToken(catalog, 314, "native").symbol).toBe("FIL.native")
-    const filtered = parseSquidCatalog(
-      [
-        {
-          chainId: "42220",
-          type: "evm",
-          networkName: "Celo",
-          nativeCurrency: { symbol: "CELO", decimals: 18 },
-        },
-      ],
-      [
-        {
-          chainId: "42220",
-          address: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-          symbol: "CELO",
-          decimals: 18,
-        },
-      ],
-    )
-    expect(() => resolveSourceToken(filtered, 42220, "native")).toThrow(
-      "does not support",
-    )
-  })
+    },
+  }
+  mutate?.(value)
+  return new Response(JSON.stringify(value))
+}
 
-  it("fetches both current Squid catalogs with the integrator ID", async () => {
-    const requests: string[] = []
-    const fetch = (async (url, init) => {
-      requests.push(String(url))
-      expect(new Headers(init?.headers).get("x-integrator-id")).toBe("test")
-      return new Response(
-        JSON.stringify(
-          String(url).endsWith("/chains") ? { chains } : { tokens },
-        ),
-      )
-    }) as typeof globalThis.fetch
-    const catalog = await fetchSquidCatalog({
+function api(options: {
+  tokens?: unknown
+  route?: (request: RouteRequest, call: number) => Response
+}) {
+  const requests: Array<{ url: string; init?: RequestInit }> = []
+  let routeCalls = 0
+  const fetch = (async (url, init) => {
+    requests.push({ url: String(url), init })
+    if (String(url).endsWith("/tokens"))
+      return new Response(JSON.stringify(options.tokens ?? { tokens }))
+    const request = JSON.parse(String(init?.body)) as RouteRequest
+    routeCalls += 1
+    return options.route?.(request, routeCalls) ?? route(request)
+  }) as typeof globalThis.fetch
+  return { fetch, requests, routeCalls: () => routeCalls }
+}
+
+function plan(
+  mocked: ReturnType<typeof api>,
+  overrides: Partial<Parameters<typeof planSquidFunding>[0]> = {},
+) {
+  return planSquidFunding(
+    {
+      owner,
+      sourceChainId: 1,
+      sourceToken: "USDC",
+      requirements: [requirement()],
+      maxSourceAmount: "1",
+      slippage: 1,
+      ...overrides,
+    },
+    {
       integratorId: "test",
       baseUrl: "https://example.test/v2",
-      fetch,
-    })
-    expect(catalog.tokens).toHaveLength(1)
-    expect(requests).toEqual([
-      "https://example.test/v2/chains",
-      "https://example.test/v2/tokens",
+      fetch: mocked.fetch,
+      now: () => 0,
+    },
+  )
+}
+
+describe("Squid funding planning", () => {
+  it("keeps the runtime API to planning, execution, and the native sentinel", () => {
+    expect(Object.keys(library).sort()).toEqual([
+      "NATIVE_TOKEN_ADDRESS",
+      "executeSquidFunding",
+      "planSquidFunding",
     ])
   })
 
-  it("rejects a blank integrator ID before making provider calls", async () => {
-    const fetch = (() => {
-      throw new Error("provider should not be called")
-    }) as typeof globalThis.fetch
-    await expect(
-      fetchSquidCatalog({ integratorId: " ", fetch }),
-    ).rejects.toThrow("integrator ID")
+  it("fetches only tokens and resolves a symbol, address, or native token", async () => {
+    for (const selector of ["USDC", sourceToken, "native"]) {
+      const mocked = api({})
+      const result = await plan(mocked, { sourceToken: selector })
+      expect(result.source.token).toBe(
+        selector === "native" ? NATIVE_TOKEN_ADDRESS : sourceToken,
+      )
+      expect(mocked.requests[0]?.url).toBe("https://example.test/v2/tokens")
+      expect(
+        new Headers(mocked.requests[0]?.init?.headers).get("x-integrator-id"),
+      ).toBe("test")
+      expect(mocked.requests.some(({ url }) => url.endsWith("/chains"))).toBe(
+        false,
+      )
+    }
   })
 
-  it("normalizes documented Squid route status values", () => {
-    expect(parseSquidStatus({ squidTransactionStatus: "SUCCESS" })).toBe(
-      "success",
-    )
-    expect(parseSquidStatus({ status: "ONGOING" })).toBe("pending")
-    expect(parseSquidStatus({ status: "REFUND" })).toBe("failed")
-  })
-
-  it("keeps an explicit provider approval spender for execution validation", async () => {
-    const source = resolveSourceToken(
-      parseSquidCatalog(chains, tokens),
-      1,
-      "USDC",
-    )
-    const result = await quoteSquidRoute(
+  it("fails closed on malformed, duplicate, ambiguous, or missing source tokens", async () => {
+    const cases = [
       {
-        owner,
-        source,
-        requirement: {
-          id: "fund",
-          chainId: 314,
-          token: destination,
-          amount: 1n,
-          recipient: owner,
+        tokens: { tokens: [{ ...tokens[0], decimals: -1 }] },
+        message: "invalid decimals",
+      },
+      {
+        tokens: { tokens: [tokens[0], tokens[0]] },
+        message: "duplicated",
+      },
+      {
+        tokens: {
+          tokens: [tokens[0], { ...tokens[0], address: target }],
         },
-        sourceAmount: 1n,
-        slippage: 1,
+        message: "ambiguous",
       },
-      {
-        integratorId: "test",
-        fetch: routeFetch((amount) => amount, target).fetch,
-        now: () => 0,
-      },
-    )
-    expect(result.approvalSpender).toBe(target)
+      { tokens: { tokens: [] }, message: "not supported" },
+      { tokens: { nope: [] }, message: "tokens must be an array" },
+    ]
+    for (const item of cases)
+      await expect(plan(api({ tokens: item.tokens }))).rejects.toThrow(
+        item.message,
+      )
   })
 
-  it("rejects a multi-leg plan when an early route expires before return", async () => {
-    const source = resolveSourceToken(
-      parseSquidCatalog(chains, tokens),
-      1,
-      "USDC",
-    )
-    const original = routeFetch((amount) => amount).fetch
-    const fetch = (async (url, init) => {
-      const response = await original(url, init)
-      const body = (await response.json()) as {
-        route: { transactionRequest: { expiry: string } }
-      }
-      body.route.transactionRequest.expiry = "50"
-      return new Response(JSON.stringify(body))
-    }) as typeof globalThis.fetch
-    let clock = 0
+  it("validates the integrator ID, cap, requirements, and slippage", async () => {
+    const mocked = api({})
     await expect(
       planSquidFunding(
         {
           owner,
-          source,
-          requirements: [
-            {
-              id: "one",
-              chainId: 314,
-              token: destination,
-              amount: 1n,
-              recipient: owner,
-            },
-            {
-              id: "two",
-              chainId: 314,
-              token: destination,
-              amount: 1n,
-              recipient: owner,
-            },
-          ],
-          maxSourceAmount: 2n,
-          initialSourceAmount: 1n,
+          sourceChainId: 1,
+          sourceToken: "USDC",
+          requirements: [requirement()],
+          maxSourceAmount: "1",
+          slippage: 1,
+        },
+        { integratorId: " ", fetch: mocked.fetch },
+      ),
+    ).rejects.toThrow("integrator ID")
+    expect(mocked.requests).toHaveLength(0)
+
+    for (const overrides of [
+      { maxSourceAmount: "0" },
+      { maxSourceAmount: "not-an-amount" },
+      { requirements: [] },
+      { requirements: [requirement("fund", 0n)] },
+      { slippage: 0 },
+      { slippage: 100 },
+    ])
+      await expect(plan(api({}), overrides)).rejects.toThrow()
+  })
+
+  it("downscales a successful seed and shares one cap across all legs", async () => {
+    const mocked = api({})
+    const result = await plan(mocked, {
+      requirements: [requirement("fil", 10n), requirement("usdfc", 5n)],
+      maxSourceAmount: "0.000015",
+    })
+    expect(result.quotes.map(({ sourceAmount }) => sourceAmount)).toEqual([
+      10n,
+      5n,
+    ])
+    expect(result.maxSourceAmount).toBe(15n)
+    expect(mocked.routeCalls()).toBe(3)
+
+    const exhausted = api({})
+    await expect(
+      plan(exhausted, {
+        requirements: [requirement("fil", 10n), requirement("usdfc", 6n)],
+        maxSourceAmount: "0.000015",
+      }),
+    ).rejects.toThrow("source-token cap")
+    expect(exhausted.routeCalls()).toBe(3)
+  })
+
+  it("keeps route request identity and executable fields fail closed", async () => {
+    const identityChanges: Array<[string, unknown]> = [
+      ["fromChain", "10"],
+      ["fromToken", target],
+      ["fromAmount", "11"],
+      ["fromAddress", target],
+      ["toChain", "10"],
+      ["toToken", target],
+      ["toAddress", target],
+      ["slippage", 2],
+      ["quoteOnly", true],
+    ]
+    for (const [key, changed] of identityChanges) {
+      const mocked = api({
+        route: (request) =>
+          route(request, 10n, (value) => {
+            const routeValue = value.route as {
+              params: Record<string, unknown>
+            }
+            routeValue.params[key] = changed
+          }),
+      })
+      await expect(plan(mocked)).rejects.toThrow("Invalid Squid route")
+    }
+
+    const transactionChanges: Array<[string, unknown]> = [
+      ["target", "bad"],
+      ["approvalSpender", "bad"],
+      ["data", "0x0"],
+      ["value", "-1"],
+      ["expiry", "0"],
+    ]
+    for (const [key, changed] of transactionChanges)
+      await expect(
+        plan(
+          api({
+            route: (request) =>
+              route(request, 10n, (value) => {
+                const routeValue = value.route as {
+                  transactionRequest: Record<string, unknown>
+                }
+                routeValue.transactionRequest[key] = changed
+              }),
+          }),
+        ),
+      ).rejects.toThrow("Invalid Squid route")
+  })
+
+  it("handles explicit provider minimums without disguising other failures", async () => {
+    const minimum = (body: unknown) =>
+      new Response(typeof body === "string" ? body : JSON.stringify(body), {
+        status: 400,
+      })
+    const retry = api({
+      route: (request, call) =>
+        call === 1
+          ? minimum({ error: { message: "amount below minimum" } })
+          : route(request),
+    })
+    await expect(plan(retry, { maxSourceAmount: "1" })).resolves.toMatchObject({
+      maxSourceAmount: 1_000_000n,
+    })
+
+    const downscaled = api({
+      route: (request, call) =>
+        call === 1 ? route(request, 1_000_000n) : minimum("input too small"),
+    })
+    await expect(plan(downscaled)).rejects.toThrow("provider minimum")
+
+    const transient = api({
+      route: () =>
+        new Response(JSON.stringify({ message: "temporarily unavailable" }), {
+          status: 503,
+        }),
+    })
+    await expect(plan(transient)).rejects.toThrow("quote failed (503)")
+  })
+
+  it("rejects expired multi-leg plans and retains a feasible fourth quote", async () => {
+    const expired = api({})
+    let nowCalls = 0
+    await expect(
+      planSquidFunding(
+        {
+          owner,
+          sourceChainId: 1,
+          sourceToken: "USDC",
+          requirements: [requirement("a"), requirement("b")],
+          maxSourceAmount: "1",
           slippage: 1,
         },
         {
           integratorId: "test",
-          fetch,
-          now: () => (clock++ < 2 ? 0 : 51_000),
+          fetch: expired.fetch,
+          now: () => (nowCalls++ < 4 ? 0 : 2_000_000_000_000),
         },
       ),
-    ).rejects.toThrow("expired before planning completed")
-  })
+    ).rejects.toThrow("expired")
 
-  it("rejects malformed catalog wrappers", async () => {
-    const fetch = (async () =>
-      new Response(JSON.stringify({ chains }))) as typeof globalThis.fetch
-    await expect(
-      fetchSquidCatalog({ integratorId: "test", fetch }),
-    ).rejects.toThrow("catalog response")
-  })
-
-  it("requotes a successful seed down to a tiny exact shortfall", async () => {
-    const source = resolveSourceToken(
-      parseSquidCatalog(chains, tokens),
-      1,
-      "USDC",
-    )
-    const mocked = routeFetch((input) => input * 10n)
-    const quotes = await planSquidFunding(
-      {
-        owner,
-        source,
-        requirements: [
-          {
-            id: "tiny",
-            chainId: 314,
-            token: destination,
-            amount: 1n,
-            recipient: owner,
-          },
-        ],
-        maxSourceAmount: 500_000n,
-        initialSourceAmount: 100_000n,
-        slippage: 1,
-      },
-      { integratorId: "test", fetch: mocked.fetch, now: () => 0 },
-    )
-    expect(quotes[0]?.sourceAmount).toBe(1n)
-    expect(mocked.calls()).toBe(2)
-  })
-
-  it("keeps all legs under one shared source cap", async () => {
-    const source = resolveSourceToken(
-      parseSquidCatalog(chains, tokens),
-      1,
-      "USDC",
-    )
-    const mocked = routeFetch((input) => input)
-    await expect(
-      planSquidFunding(
-        {
-          owner,
-          source,
-          requirements: [
-            {
-              id: "one",
-              chainId: 314,
-              token: destination,
-              amount: 60n,
-              recipient: owner,
-            },
-            {
-              id: "two",
-              chainId: 314,
-              token: destination,
-              amount: 60n,
-              recipient: owner,
-            },
-          ],
-          maxSourceAmount: 100n,
-          initialSourceAmount: 50n,
-          slippage: 1,
-        },
-        { integratorId: "test", fetch: mocked.fetch, now: () => 0 },
-      ),
-    ).rejects.toThrow("source-token cap")
-    expect(mocked.calls()).toBe(3)
-  })
-
-  it("rejects a route that changes the requested destination token", async () => {
-    const source = resolveSourceToken(
-      parseSquidCatalog(chains, tokens),
-      1,
-      "USDC",
-    )
-    const mocked = routeFetch((input) => input)
-    const original = mocked.fetch
-    mocked.fetch = (async (url, init) => {
-      const response = await original(url, init)
-      const body = (await response.json()) as {
-        route: { params: Record<string, string> }
-      }
-      body.route.params.toToken = sourceAddress
-      return new Response(JSON.stringify(body))
-    }) as typeof globalThis.fetch
-    await expect(
-      planSquidFunding(
-        {
-          owner,
-          source,
-          requirements: [
-            {
-              id: "one",
-              chainId: 314,
-              token: destination,
-              amount: 1n,
-              recipient: owner,
-            },
-          ],
-          maxSourceAmount: 10n,
-          initialSourceAmount: 1n,
-          slippage: 1,
-        },
-        { integratorId: "test", fetch: mocked.fetch, now: () => 0 },
-      ),
-    ).rejects.toThrow("request identity mismatch")
-  })
-
-  it("rejects malformed executable route fields", async () => {
-    const source = resolveSourceToken(
-      parseSquidCatalog(chains, tokens),
-      1,
-      "USDC",
-    )
-    for (const [mutate, message] of [
-      [
-        (body: { route: { quoteId: string } }) => {
-          body.route.quoteId = ""
-        },
-        "missing route fields",
-      ],
-      [
-        (body: { route: { params: { slippage: number } } }) => {
-          body.route.params.slippage = 2
-        },
-        "request identity mismatch",
-      ],
-      [
-        (body: { route: { params: { quoteOnly: boolean } } }) => {
-          body.route.params.quoteOnly = true
-        },
-        "request identity mismatch",
-      ],
-      [
-        (body: { route: { transactionRequest: { data: string } } }) => {
-          body.route.transactionRequest.data = "0x0"
-        },
-        "calldata",
-      ],
-    ] as const) {
-      const mocked = routeFetch((input) => input)
-      const original = mocked.fetch
-      mocked.fetch = (async (url, init) => {
-        const response = await original(url, init)
-        const body = (await response.json()) as {
-          route: Record<string, unknown>
-        }
-        mutate(body as never)
-        return new Response(JSON.stringify(body))
-      }) as typeof globalThis.fetch
-      await expect(
-        planSquidFunding(
-          {
-            owner,
-            source,
-            requirements: [
-              {
-                id: "one",
-                chainId: 314,
-                token: destination,
-                amount: 1n,
-                recipient: owner,
-              },
-            ],
-            maxSourceAmount: 1n,
-            initialSourceAmount: 1n,
-            slippage: 1,
-          },
-          { integratorId: "test", fetch: mocked.fetch, now: () => 0 },
-        ),
-      ).rejects.toThrow(message)
-    }
-  })
-
-  it("uses the official inclusive slippage bounds and preserves request IDs", async () => {
-    const source = resolveSourceToken(
-      parseSquidCatalog(chains, tokens),
-      1,
-      "USDC",
-    )
-    const mocked = routeFetch((input) => input)
-    const fetch = (async (url, init) => {
-      const response = await mocked.fetch(url, init)
-      return new Response(await response.text(), {
-        headers: { "x-request-id": "header-id" },
-      })
-    }) as typeof globalThis.fetch
-    const quotes = await planSquidFunding(
-      {
-        owner,
-        source,
-        requirements: [
-          {
-            id: "one",
-            chainId: 314,
-            token: destination,
-            amount: 1n,
-            recipient: owner,
-          },
-        ],
-        maxSourceAmount: 1n,
-        initialSourceAmount: 1n,
-        slippage: 99.99,
-      },
-      { integratorId: "test", fetch, now: () => 0 },
-    )
-    expect(quotes[0]?.requestId).toBe("header-id")
-    await expect(
-      planSquidFunding(
-        {
-          owner,
-          source,
-          requirements: [
-            {
-              id: "one",
-              chainId: 314,
-              token: destination,
-              amount: 1n,
-              recipient: owner,
-            },
-          ],
-          maxSourceAmount: 1n,
-          initialSourceAmount: 1n,
-          slippage: 0.009,
-        },
-        { integratorId: "test", fetch, now: () => 0 },
-      ),
-    ).rejects.toThrow("0.01")
-  })
-
-  it("only rewrites an explicit provider minimum after downscaling", async () => {
-    const source = resolveSourceToken(
-      parseSquidCatalog(chains, tokens),
-      1,
-      "USDC",
-    )
-    let calls = 0
-    const fetch = (async (_url, init) => {
-      calls += 1
-      if (calls === 2)
-        return new Response(
-          JSON.stringify({ message: "below minimum amount" }),
-          {
-            status: 400,
-          },
-        )
-      return routeFetch((input) => input * 10n).fetch("", init)
-    }) as typeof globalThis.fetch
-    await expect(
-      planSquidFunding(
-        {
-          owner,
-          source,
-          requirements: [
-            {
-              id: "one",
-              chainId: 314,
-              token: destination,
-              amount: 1n,
-              recipient: owner,
-            },
-          ],
-          maxSourceAmount: 100n,
-          initialSourceAmount: 10n,
-          slippage: 1,
-        },
-        { integratorId: "test", fetch, now: () => 0 },
-      ),
-    ).rejects.toThrow("provider minimum")
-  })
-
-  it("retries a first minimum at the remaining cap", async () => {
-    const source = resolveSourceToken(
-      parseSquidCatalog(chains, tokens),
-      1,
-      "USDC",
-    )
-    let calls = 0
-    const routes = routeFetch((input) => input)
-    const fetch = (async (url, init) => {
-      calls += 1
-      if (calls === 1)
-        return new Response(
-          JSON.stringify({ message: "below minimum amount" }),
-          {
-            status: 400,
-          },
-        )
-      return routes.fetch(url, init)
-    }) as typeof globalThis.fetch
-    const quotes = await planSquidFunding(
-      {
-        owner,
-        source,
-        requirements: [
-          {
-            id: "one",
-            chainId: 314,
-            token: destination,
-            amount: 80n,
-            recipient: owner,
-          },
-        ],
-        maxSourceAmount: 100n,
-        initialSourceAmount: 10n,
-        slippage: 1,
-      },
-      { integratorId: "test", fetch, now: () => 0 },
-    )
-    expect(quotes[0]?.sourceAmount).toBe(80n)
-    expect(calls).toBe(3)
-  })
-
-  it("recognizes nested and plain-text minimums without rewriting transient client failures", async () => {
-    const source = resolveSourceToken(
-      parseSquidCatalog(chains, tokens),
-      1,
-      "USDC",
-    )
-    for (const body of [
-      JSON.stringify({ error: { message: "amount below minimum" } }),
-      "amount below minimum",
-    ]) {
-      let calls = 0
-      const routes = routeFetch((input) => input)
-      const fetch = (async (url, init) => {
-        calls += 1
-        if (calls === 1) return new Response(body, { status: 400 })
-        return routes.fetch(url, init)
-      }) as typeof globalThis.fetch
-      await expect(
-        planSquidFunding(
-          {
-            owner,
-            source,
-            requirements: [
-              {
-                id: "one",
-                chainId: 314,
-                token: destination,
-                amount: 1n,
-                recipient: owner,
-              },
-            ],
-            maxSourceAmount: 10n,
-            initialSourceAmount: 1n,
-            slippage: 1,
-          },
-          { integratorId: "test", fetch, now: () => 0 },
-        ),
-      ).resolves.toHaveLength(1)
-    }
-    const transient = (async () =>
-      new Response("upstream timeout", {
-        status: 422,
-      })) as typeof globalThis.fetch
-    await expect(
-      planSquidFunding(
-        {
-          owner,
-          source,
-          requirements: [
-            {
-              id: "one",
-              chainId: 314,
-              token: destination,
-              amount: 1n,
-              recipient: owner,
-            },
-          ],
-          maxSourceAmount: 10n,
-          initialSourceAmount: 1n,
-          slippage: 1,
-        },
-        { integratorId: "test", fetch: transient, now: () => 0 },
-      ),
-    ).rejects.toThrow("Squid quote failed (422)")
-  })
-
-  it("checks the remaining cap once before rejecting an extrapolated shortfall", async () => {
-    const source = resolveSourceToken(
-      parseSquidCatalog(chains, tokens),
-      1,
-      "USDC",
-    )
-    let calls = 0
-    const fetch = (async (_url, init) => {
-      calls += 1
-      const request = JSON.parse(String(init?.body)) as { fromAmount: string }
-      return routeFetch((input) => (input === 10n ? 1n : input)).fetch("", {
-        body: JSON.stringify({ ...request, slippage: 1 }),
-      })
-    }) as typeof globalThis.fetch
-    const quotes = await planSquidFunding(
-      {
-        owner,
-        source,
-        requirements: [
-          {
-            id: "one",
-            chainId: 314,
-            token: destination,
-            amount: 50n,
-            recipient: owner,
-          },
-        ],
-        maxSourceAmount: 100n,
-        initialSourceAmount: 10n,
-        slippage: 1,
-      },
-      { integratorId: "test", fetch, now: () => 0 },
-    )
-    expect(quotes[0]?.sourceAmount).toBe(50n)
-    expect(calls).toBe(3)
-  })
-
-  it("does not quote a later leg after the shared cap is exhausted", async () => {
-    const source = resolveSourceToken(
-      parseSquidCatalog(chains, tokens),
-      1,
-      "USDC",
-    )
-    const mocked = routeFetch((input) => input)
-    await expect(
-      planSquidFunding(
-        {
-          owner,
-          source,
-          requirements: [
-            {
-              id: "one",
-              chainId: 314,
-              token: destination,
-              amount: 10n,
-              recipient: owner,
-            },
-            {
-              id: "two",
-              chainId: 314,
-              token: destination,
-              amount: 1n,
-              recipient: owner,
-            },
-          ],
-          maxSourceAmount: 10n,
-          initialSourceAmount: 10n,
-          slippage: 1,
-        },
-        { integratorId: "test", fetch: mocked.fetch, now: () => 0 },
-      ),
-    ).rejects.toThrow("source-token cap")
-    expect(mocked.calls()).toBe(1)
-  })
-
-  it("keeps a feasible fourth quote when fixed fees prevent convergence", async () => {
-    const source = resolveSourceToken(
-      parseSquidCatalog(chains, tokens),
-      1,
-      "USDC",
-    )
-    const inputs: bigint[] = []
-    const outputs = new Map([
-      [100n, 50n],
-      [200n, 150n],
-      [134n, 84n],
-      [160n, 110n],
-    ])
-    const fetch = (async (_url, init) => {
-      const request = JSON.parse(String(init?.body)) as { fromAmount: string }
-      const input = BigInt(request.fromAmount)
-      inputs.push(input)
-      return routeFetch(() => outputs.get(input) ?? 0n).fetch("", init)
-    }) as typeof globalThis.fetch
-    const quotes = await planSquidFunding(
-      {
-        owner,
-        source,
-        requirements: [
-          {
-            id: "one",
-            chainId: 314,
-            token: destination,
-            amount: 100n,
-            recipient: owner,
-          },
-        ],
-        maxSourceAmount: 200n,
-        initialSourceAmount: 100n,
-        slippage: 1,
-      },
-      { integratorId: "test", fetch, now: () => 0 },
-    )
-    expect(inputs).toEqual([100n, 200n, 134n, 160n])
-    expect(quotes[0]?.sourceAmount).toBe(160n)
+    const outputs = [1_000_000n, 20n, 9n, 10n]
+    const converges = api({
+      route: (request, call) => route(request, outputs[call - 1] as bigint),
+    })
+    const result = await plan(converges)
+    expect(result.quotes[0]?.destinationAmount).toBe(10n)
+    expect(converges.routeCalls()).toBe(4)
   })
 })
