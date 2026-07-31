@@ -136,15 +136,6 @@ function clients(
         return 8
       return 7 + calls.send
     },
-    prepareTransactionRequest: async (request: Record<string, unknown>) => {
-      calls.prepared.push(request)
-      return {
-        ...request,
-        gas: 2n,
-        maxFeePerGas: options.feePerGas ?? 3n,
-        maxPriorityFeePerGas: 1n,
-      }
-    },
     estimateTotalFee:
       options.totalFee == null
         ? undefined
@@ -183,6 +174,16 @@ function clients(
     getChainId: async () => {
       walletChainReads += 1
       return options.walletDrift && walletChainReads > 1 ? 10 : 1
+    },
+    prepareTransactionRequest: async (request: Record<string, unknown>) => {
+      calls.prepared.push(request)
+      return {
+        ...request,
+        account: owner,
+        gas: 2n,
+        maxFeePerGas: options.feePerGas ?? 3n,
+        maxPriorityFeePerGas: 1n,
+      }
     },
     sendTransaction: async (request: Record<string, unknown>) => {
       calls.send += 1
@@ -256,6 +257,7 @@ describe("guarded Squid execution", () => {
     expect(mocked.calls.sent[1]).toEqual(
       expect.objectContaining({ to: target, data: "0x02", value: 0n }),
     )
+    expect(mocked.calls.sent[1]?.account).toBe(mocked.wallet.account)
   })
 
   it("resets an overbroad allowance before setting the exact amount", async () => {

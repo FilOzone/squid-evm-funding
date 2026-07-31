@@ -183,6 +183,10 @@ describe("Squid funding planning", () => {
       { maxSourceAmount: "not-an-amount" },
       { requirements: [] },
       { requirements: [requirement("fund", 0n)] },
+      { requirements: [requirement(), requirement()] },
+      {
+        requirements: [requirement(), { ...requirement("other"), chainId: 10 }],
+      },
       { slippage: 0 },
       { slippage: 100 },
     ])

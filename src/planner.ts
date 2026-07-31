@@ -36,6 +36,16 @@ export async function planSquidFunding(
     input.requirements.some((requirement) => requirement.amount <= 0n)
   )
     throw new Error("A source chain and destination requirement are required")
+  if (
+    new Set(input.requirements.map((requirement) => requirement.id)).size !==
+    input.requirements.length
+  )
+    throw new Error("Requirement IDs must be unique")
+  if (
+    new Set(input.requirements.map((requirement) => requirement.chainId))
+      .size !== 1
+  )
+    throw new Error("All requirements must use one destination chain")
 
   const source = resolveSourceToken(
     await fetchSourceTokens(input.sourceChainId, options),

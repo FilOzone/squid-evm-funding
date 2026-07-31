@@ -63,7 +63,6 @@ export type SquidPublicClient = Pick<
   | "getBalance"
   | "getChainId"
   | "getTransactionCount"
-  | "prepareTransactionRequest"
   | "readContract"
   | "waitForTransactionReceipt"
 > & {
@@ -82,5 +81,5 @@ export type SquidPublicClient = Pick<
 
 export type SquidWalletClient = Pick<
   WalletClient,
-  "getChainId" | "sendTransaction"
+  "getChainId" | "prepareTransactionRequest" | "sendTransaction"
 > & { account: Account }

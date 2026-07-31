@@ -80,15 +80,15 @@ async function balance(
 }
 
 async function prepare(
-  client: SquidPublicClient,
+  publicClient: SquidPublicClient,
+  walletClient: SquidWalletClient,
   transaction: Transaction,
-  account: Address,
   nonce: number,
   feeMode: "standard" | "op-stack",
   buffer: ((totalFee: bigint) => bigint) | undefined,
 ) {
-  const request = await client.prepareTransactionRequest({
-    account,
+  const request = await walletClient.prepareTransactionRequest({
+    account: walletClient.account,
     chain: undefined,
     ...transaction,
     nonce,
@@ -113,10 +113,10 @@ async function prepare(
         gas * (hasLegacyFee ? (gasPrice as bigint) : (maxFeePerGas as bigint)),
       request,
     }
-  if (client.estimateTotalFee == null || buffer == null)
+  if (publicClient.estimateTotalFee == null || buffer == null)
     throw new Error("OP Stack total-fee accounting and buffer are required")
-  const total = await client.estimateTotalFee({
-    account,
+  const total = await publicClient.estimateTotalFee({
+    account: walletClient.account.address,
     to: transaction.to,
     data: transaction.data,
     value: transaction.value,
@@ -234,8 +234,8 @@ export async function executeSquidFunding(
       throw new Error("Source account has pending transactions")
     const prepared = await prepare(
       dependencies.publicClient,
+      dependencies.walletClient,
       transaction,
-      plan.owner,
       pendingNonce,
       input.feeMode,
       input.opStackFeeBuffer,
@@ -278,9 +278,9 @@ export async function executeSquidFunding(
     validate?.()
     totalNativeFee += prepared.fee
     const transactionHash = (await dependencies.walletClient.sendTransaction({
+      ...prepared.request,
       account: dependencies.walletClient.account,
       chain: undefined,
-      ...prepared.request,
     } as never)) as Hash
     const receipt = await dependencies.publicClient.waitForTransactionReceipt({
       hash: transactionHash,
