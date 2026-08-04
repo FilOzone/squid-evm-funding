@@ -10,6 +10,9 @@ import type {
 export const NATIVE_TOKEN_ADDRESS =
   "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" as Address
 
+export const SQUID_ROUTER_ADDRESS =
+  "0xce16f69375520ab01377ce7b88f5ba8c48f8d666" as Address
+
 export interface SourceToken {
   chainId: number
   token: Address
@@ -25,6 +28,26 @@ export interface DestinationRequirement {
   recipient: Address
 }
 
+export interface SquidRouteAction {
+  type: string
+  fromChainId: number
+  toChainId: number
+  provider?: string
+  description?: string
+}
+
+export interface SquidQuoteCost {
+  kind: "fee" | "gas"
+  name: string
+  amount: bigint
+  amountUsd?: string
+  token: {
+    chainId: number
+    symbol: string
+    decimals: number
+  }
+}
+
 export interface SquidQuote {
   id: string
   requirement: DestinationRequirement
@@ -35,6 +58,8 @@ export interface SquidQuote {
   data: Hex
   value: bigint
   expiresAt: number
+  actions: readonly SquidRouteAction[]
+  costs: readonly SquidQuoteCost[]
 }
 
 export interface SquidFundingPlan {

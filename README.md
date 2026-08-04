@@ -21,6 +21,8 @@ pnpm add squid-evm-funding viem
 - **Requirement:** a token amount that must arrive at a recipient on one
   destination EVM chain.
 - **Source:** the caller-selected chain and Squid-catalog token to spend.
+- **Quote:** fixed source and minimum destination amounts with validated action
+  and cost summaries for review.
 - **Plan:** validated fixed-input routes that fit one source-token cap.
 - **Execution:** refreshed, guarded transactions followed by receipt, Squid
   status, and destination-balance checks.
@@ -30,6 +32,11 @@ pnpm add squid-evm-funding viem
 The public API supports read-only catalog and quote review plus
 `planSquidFunding` and `executeSquidFunding`. The caller owns the account, RPC
 URLs, trusted Squid addresses, fee policy, and integrator ID.
+
+`quoteSquidRoute` returns `actions` and `costs` parsed from Squid's estimate.
+Before displaying a quote as trusted, pass it to `assertTrustedSquidQuote` with
+the target and spender allowed by the host application. The package exports
+`SQUID_ROUTER_ADDRESS` for the router used by this integration.
 
 ### Browser wallet
 

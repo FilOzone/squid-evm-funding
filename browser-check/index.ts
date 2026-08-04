@@ -1,9 +1,11 @@
 import {
+  assertTrustedSquidQuote,
   executeSquidFunding,
   fetchSourceTokens,
   planSquidFunding,
   quoteSquidRoute,
   resolveSourceToken,
+  SQUID_ROUTER_ADDRESS,
 } from "squid-evm-funding"
 import { createWalletClient, custom } from "viem"
 import { arbitrum } from "viem/chains"
@@ -13,11 +15,13 @@ type BrowserProvider = {
 }
 
 export const squidBrowserApi = {
+  assertTrustedSquidQuote,
   executeSquidFunding,
   fetchSourceTokens,
   planSquidFunding,
   quoteSquidRoute,
   resolveSourceToken,
+  SQUID_ROUTER_ADDRESS,
 }
 
 export async function connectSquidBrowserWallet(provider: BrowserProvider) {

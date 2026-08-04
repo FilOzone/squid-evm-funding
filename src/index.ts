@@ -2,6 +2,7 @@ export { resolveSourceToken } from "./catalog.js"
 export { executeSquidFunding } from "./execution.js"
 export { planSquidFunding } from "./planner.js"
 export {
+  assertTrustedSquidQuote,
   fetchSourceTokens,
   quoteSquidRoute,
   SquidMinimumAmountError,
@@ -14,6 +15,8 @@ export type {
   SquidFundingPlan,
   SquidPublicClient,
   SquidQuote,
+  SquidQuoteCost,
+  SquidRouteAction,
   SquidWalletClient,
 } from "./types.js"
-export { NATIVE_TOKEN_ADDRESS } from "./types.js"
+export { NATIVE_TOKEN_ADDRESS, SQUID_ROUTER_ADDRESS } from "./types.js"
