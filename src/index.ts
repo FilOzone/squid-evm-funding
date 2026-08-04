@@ -1,5 +1,11 @@
+export { resolveSourceToken } from "./catalog.js"
 export { executeSquidFunding } from "./execution.js"
 export { planSquidFunding } from "./planner.js"
+export {
+  fetchSourceTokens,
+  quoteSquidRoute,
+  SquidMinimumAmountError,
+} from "./squid.js"
 export type {
   DestinationRequirement,
   SourceToken,

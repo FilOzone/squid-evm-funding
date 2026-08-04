@@ -1,6 +1,6 @@
 {
   "name": "squid-evm-funding",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Minimal helpers for acquiring exact EVM token shortfalls through Squid",
   "type": "module",
   "packageManager": "pnpm@10.32.1",
