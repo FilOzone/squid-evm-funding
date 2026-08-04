@@ -58,9 +58,7 @@ function squidFetch() {
         }),
       )
     if (url.includes("/status?"))
-      return new Response(
-        JSON.stringify({ squidTransactionStatus: "success" }),
-      )
+      return new Response(JSON.stringify({ squidTransactionStatus: "success" }))
 
     routeCalls += 1
     const request = JSON.parse(String(init?.body)) as {
