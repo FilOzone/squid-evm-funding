@@ -115,7 +115,9 @@ for (const path of runtimeFiles) {
 }
 
 if (failures.length > 0)
-  throw new Error(`Published runtime is not browser-safe:\n${failures.join("\n")}`)
+  throw new Error(
+    `Published runtime is not browser-safe:\n${failures.join("\n")}`,
+  )
 
 console.log(
   `Browser runtime check passed: ${runtimeFiles.length} modules, ${publishedBytes} published JavaScript bytes, no Node built-ins or globals.`,
