@@ -1,14 +1,16 @@
 {
   "name": "squid-evm-funding",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Minimal helpers for acquiring exact EVM token shortfalls through Squid",
   "type": "module",
   "packageManager": "pnpm@10.32.1",
   "main": "./dist/index.js",
+  "browser": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
+      "browser": "./dist/index.js",
       "default": "./dist/index.js"
     }
   },
@@ -18,13 +20,14 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=24"
+    "node": ">=18"
   },
   "scripts": {
     "build": "node scripts/clean-dist.mjs && tsc",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "test": "vitest run",
+    "browser:check": "node scripts/clean-dist.mjs && tsc && tsc -p tsconfig.browser.json && node --conditions=browser scripts/check-browser-runtime.mjs && vitest run src/browser.test.ts",
     "prepare": "node scripts/clean-dist.mjs && tsc",
     "pack:check": "pnpm pack --dry-run"
   },
