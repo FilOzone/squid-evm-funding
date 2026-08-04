@@ -45,6 +45,9 @@ const forbiddenGlobals = new Set([
   "Buffer",
   "process",
   "require",
+  "global",
+  "module",
+  "exports",
   "__dirname",
   "__filename",
 ])
