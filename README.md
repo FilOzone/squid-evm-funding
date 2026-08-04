@@ -6,11 +6,11 @@ built-in `fetch`, and caller-created [viem](https://viem.sh/) clients.
 
 ## Runtime support
 
-The published ESM entry point supports modern browsers and Node.js. Browser
-builds use standard web APIs and do not require Node built-ins, `Buffer`,
-`process`, or Node polyfills. Repository development, tests, builds, and
-publishing use Node.js 24 and pnpm 10.32.1; those are tooling requirements, not
-browser runtime requirements.
+The published ESM entry point supports modern browsers and Node.js 18 or newer.
+Browser builds use standard web APIs and do not require Node built-ins,
+`Buffer`, `process`, or Node polyfills. Repository development, tests, builds,
+and publishing use Node.js 24 and pnpm 10.32.1; those are tooling requirements,
+not the package's minimum Node runtime.
 
 ```sh
 pnpm add squid-evm-funding viem
