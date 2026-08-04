@@ -346,6 +346,30 @@ describe("Squid funding planning", () => {
       ).rejects.toThrow("Invalid Squid route")
   })
 
+  it("ties displayed actions to a continuous requested route", async () => {
+    for (const changed of [
+      [{ type: "bridge", fromChain: "10", toChain: "314" }],
+      [{ type: "bridge", fromChain: "1", toChain: "10" }],
+      [
+        { type: "swap", fromChain: "1", toChain: "10" },
+        { type: "bridge", fromChain: "137", toChain: "314" },
+      ],
+    ])
+      await expect(
+        plan(
+          api({
+            route: (request) =>
+              route(request, 10n, (value) => {
+                const routeValue = value.route as {
+                  estimate: Record<string, unknown>
+                }
+                routeValue.estimate.actions = changed
+              }),
+          }),
+        ),
+      ).rejects.toThrow("action chain mismatch")
+  })
+
   it("handles explicit provider minimums without disguising other failures", async () => {
     const minimum = (body: unknown) =>
       new Response(typeof body === "string" ? body : JSON.stringify(body), {

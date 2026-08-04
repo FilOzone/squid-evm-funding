@@ -67,10 +67,14 @@ function chainId(value: unknown, label: string): number {
   return parsed
 }
 
-function actions(value: unknown): SquidRouteAction[] {
+function actions(
+  value: unknown,
+  sourceChainId: number,
+  destinationChainId: number,
+): SquidRouteAction[] {
   if (!Array.isArray(value) || value.length === 0)
     throw new Error("Invalid Squid route: actions")
-  return value.map((item, index) => {
+  const parsed = value.map((item, index) => {
     if (item == null || typeof item !== "object")
       throw new Error(`Invalid Squid route: action ${index + 1}`)
     const action = item as Record<string, unknown>
@@ -93,6 +97,17 @@ function actions(value: unknown): SquidRouteAction[] {
         : {}),
     }
   })
+  if (
+    parsed[0]?.fromChainId !== sourceChainId ||
+    parsed.at(-1)?.toChainId !== destinationChainId ||
+    parsed.some(
+      (action, index) =>
+        parsed[index + 1] != null &&
+        action.toChainId !== parsed[index + 1]?.fromChainId,
+    )
+  )
+    throw new Error("Invalid Squid route: action chain mismatch")
+  return parsed
 }
 
 function costs(value: unknown, kind: SquidQuoteCost["kind"]): SquidQuoteCost[] {
@@ -292,7 +307,11 @@ export async function quoteSquidRoute(
     data: transaction.data as Hex,
     value: amount(transaction.value ?? "0", "value"),
     expiresAt,
-    actions: actions(route.estimate?.actions),
+    actions: actions(
+      route.estimate?.actions,
+      input.source.chainId,
+      input.requirement.chainId,
+    ),
     costs: [
       ...costs(route.estimate?.feeCosts, "fee"),
       ...costs(route.estimate?.gasCosts, "gas"),
