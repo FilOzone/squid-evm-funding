@@ -74,7 +74,7 @@ function route(
           {
             name: "Service fee",
             amount: "1",
-            amountUsd: "0.01",
+            amountUSD: "0.01",
             token: {
               chainId: request.fromChain,
               symbol: "USDC",
@@ -368,6 +368,22 @@ describe("Squid funding planning", () => {
           }),
         ),
       ).rejects.toThrow("action chain mismatch")
+  })
+
+  it("rejects displayed costs from a chain outside the route", async () => {
+    await expect(
+      plan(
+        api({
+          route: (request) =>
+            route(request, 10n, (value) => {
+              const routeValue = value.route as {
+                estimate: { feeCosts: Array<{ token: { chainId: string } }> }
+              }
+              routeValue.estimate.feeCosts[0].token.chainId = "137"
+            }),
+        }),
+      ),
+    ).rejects.toThrow("cost chain mismatch")
   })
 
   it("handles explicit provider minimums without disguising other failures", async () => {

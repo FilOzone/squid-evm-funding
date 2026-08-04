@@ -110,7 +110,11 @@ function actions(
   return parsed
 }
 
-function costs(value: unknown, kind: SquidQuoteCost["kind"]): SquidQuoteCost[] {
+function costs(
+  value: unknown,
+  kind: SquidQuoteCost["kind"],
+  routeChains: ReadonlySet<number>,
+): SquidQuoteCost[] {
   if (!Array.isArray(value))
     throw new Error(`Invalid Squid route: ${kind} costs`)
   return value.map((item, index) => {
@@ -126,6 +130,12 @@ function costs(value: unknown, kind: SquidQuoteCost["kind"]): SquidQuoteCost[] {
       throw new Error(
         `Invalid Squid route: ${kind} cost ${index + 1} token decimals`,
       )
+    const tokenChainId = chainId(
+      tokenData.chainId,
+      `${kind} cost ${index + 1} token chain`,
+    )
+    if (!routeChains.has(tokenChainId))
+      throw new Error(`Invalid Squid route: ${kind} cost chain mismatch`)
     return {
       kind,
       name: text(
@@ -133,14 +143,11 @@ function costs(value: unknown, kind: SquidQuoteCost["kind"]): SquidQuoteCost[] {
         `${kind} cost ${index + 1} name`,
       ),
       amount: amount(cost.amount, `${kind} cost ${index + 1} amount`),
-      ...(typeof cost.amountUsd === "string" && cost.amountUsd.trim() !== ""
-        ? { amountUsd: cost.amountUsd }
+      ...(typeof cost.amountUSD === "string" && cost.amountUSD.trim() !== ""
+        ? { amountUsd: cost.amountUSD }
         : {}),
       token: {
-        chainId: chainId(
-          tokenData.chainId,
-          `${kind} cost ${index + 1} token chain`,
-        ),
+        chainId: tokenChainId,
         symbol: text(
           tokenData.symbol,
           `${kind} cost ${index + 1} token symbol`,
@@ -294,6 +301,14 @@ export async function quoteSquidRoute(
     transaction.approvalSpender == null
       ? undefined
       : address(transaction.approvalSpender, "approval spender")
+  const routeActions = actions(
+    route.estimate?.actions,
+    input.source.chainId,
+    input.requirement.chainId,
+  )
+  const routeChains = new Set(
+    routeActions.flatMap((action) => [action.fromChainId, action.toChainId]),
+  )
   return {
     id: route.quoteId,
     requirement: input.requirement,
@@ -307,14 +322,10 @@ export async function quoteSquidRoute(
     data: transaction.data as Hex,
     value: amount(transaction.value ?? "0", "value"),
     expiresAt,
-    actions: actions(
-      route.estimate?.actions,
-      input.source.chainId,
-      input.requirement.chainId,
-    ),
+    actions: routeActions,
     costs: [
-      ...costs(route.estimate?.feeCosts, "fee"),
-      ...costs(route.estimate?.gasCosts, "gas"),
+      ...costs(route.estimate?.feeCosts, "fee", routeChains),
+      ...costs(route.estimate?.gasCosts, "gas", routeChains),
     ],
   }
 }
