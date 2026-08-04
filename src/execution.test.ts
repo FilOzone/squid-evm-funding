@@ -82,7 +82,18 @@ function provider(
     const route: Record<string, unknown> = {
       quoteId: `fresh-${routeCalls}`,
       params: { ...request },
-      estimate: { toAmountMin: request.fromAmount },
+      estimate: {
+        toAmountMin: request.fromAmount,
+        actions: [
+          {
+            type: "bridge",
+            fromChain: request.fromChain,
+            toChain: request.toChain,
+          },
+        ],
+        feeCosts: [],
+        gasCosts: [],
+      },
       transactionRequest: {
         target,
         approvalSpender: spender,

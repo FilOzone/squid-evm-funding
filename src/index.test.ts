@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest"
 import * as library from "./index.js"
-import { NATIVE_TOKEN_ADDRESS, planSquidFunding } from "./index.js"
+import {
+  assertTrustedSquidQuote,
+  NATIVE_TOKEN_ADDRESS,
+  planSquidFunding,
+} from "./index.js"
 
 const owner = "0x1111111111111111111111111111111111111111" as const
 const sourceToken = "0x2222222222222222222222222222222222222222" as const
@@ -55,7 +59,31 @@ function route(
     route: {
       quoteId: `quote-${request.fromAmount}`,
       params: { ...request },
-      estimate: { toAmountMin: output.toString() },
+      estimate: {
+        toAmountMin: output.toString(),
+        actions: [
+          {
+            type: "bridge",
+            fromChain: request.fromChain,
+            toChain: request.toChain,
+            provider: "Squid",
+            description: "Bridge tokens",
+          },
+        ],
+        feeCosts: [
+          {
+            name: "Service fee",
+            amount: "1",
+            amountUSD: "0.01",
+            token: {
+              chainId: request.fromChain,
+              symbol: "USDC",
+              decimals: 6,
+            },
+          },
+        ],
+        gasCosts: [],
+      },
       transactionRequest: {
         target,
         approvalSpender: spender,
@@ -114,13 +142,45 @@ describe("Squid funding planning", () => {
   it("keeps the runtime API to catalog, quote, planning, and execution", () => {
     expect(Object.keys(library).sort()).toEqual([
       "NATIVE_TOKEN_ADDRESS",
+      "SQUID_ROUTER_ADDRESS",
       "SquidMinimumAmountError",
+      "assertTrustedSquidQuote",
       "executeSquidFunding",
       "fetchSourceTokens",
       "planSquidFunding",
       "quoteSquidRoute",
       "resolveSourceToken",
     ])
+  })
+
+  it("returns review metadata and rejects an unexpected target or spender", async () => {
+    const [quote] = (await plan(api({}))).quotes
+    expect(quote?.actions).toEqual([
+      {
+        type: "bridge",
+        fromChainId: 1,
+        toChainId: 314,
+        provider: "Squid",
+        description: "Bridge tokens",
+      },
+    ])
+    expect(quote?.costs).toEqual([
+      {
+        kind: "fee",
+        name: "Service fee",
+        amount: 1n,
+        amountUsd: "0.01",
+        token: { chainId: 1, symbol: "USDC", decimals: 6 },
+      },
+    ])
+    if (quote == null) throw new Error("Expected a Squid quote")
+    expect(assertTrustedSquidQuote(quote, { target, spender })).toBe(quote)
+    expect(() =>
+      assertTrustedSquidQuote(quote, {
+        target: destinationToken,
+        spender,
+      }),
+    ).toThrow("trusted target or spender")
   })
 
   it("fetches only tokens and resolves a symbol, address, or native token", async () => {
@@ -266,6 +326,64 @@ describe("Squid funding planning", () => {
           }),
         ),
       ).rejects.toThrow("Invalid Squid route")
+
+    for (const [key, changed] of [
+      ["actions", []],
+      ["feeCosts", [{ amount: "-1" }]],
+    ] as const)
+      await expect(
+        plan(
+          api({
+            route: (request) =>
+              route(request, 10n, (value) => {
+                const routeValue = value.route as {
+                  estimate: Record<string, unknown>
+                }
+                routeValue.estimate[key] = changed
+              }),
+          }),
+        ),
+      ).rejects.toThrow("Invalid Squid route")
+  })
+
+  it("ties displayed actions to a continuous requested route", async () => {
+    for (const changed of [
+      [{ type: "bridge", fromChain: "10", toChain: "314" }],
+      [{ type: "bridge", fromChain: "1", toChain: "10" }],
+      [
+        { type: "swap", fromChain: "1", toChain: "10" },
+        { type: "bridge", fromChain: "137", toChain: "314" },
+      ],
+    ])
+      await expect(
+        plan(
+          api({
+            route: (request) =>
+              route(request, 10n, (value) => {
+                const routeValue = value.route as {
+                  estimate: Record<string, unknown>
+                }
+                routeValue.estimate.actions = changed
+              }),
+          }),
+        ),
+      ).rejects.toThrow("action chain mismatch")
+  })
+
+  it("rejects displayed costs from a chain outside the route", async () => {
+    await expect(
+      plan(
+        api({
+          route: (request) =>
+            route(request, 10n, (value) => {
+              const routeValue = value.route as {
+                estimate: { feeCosts: Array<{ token: { chainId: string } }> }
+              }
+              routeValue.estimate.feeCosts[0].token.chainId = "137"
+            }),
+        }),
+      ),
+    ).rejects.toThrow("cost chain mismatch")
   })
 
   it("handles explicit provider minimums without disguising other failures", async () => {

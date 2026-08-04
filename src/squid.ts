@@ -5,6 +5,8 @@ import type {
   SourceToken,
   SquidClientOptions,
   SquidQuote,
+  SquidQuoteCost,
+  SquidRouteAction,
 } from "./types.js"
 
 const DEFAULT_BASE_URL = "https://v2.api.squidrouter.com/v2"
@@ -13,7 +15,12 @@ type RouteWire = {
   route?: {
     quoteId?: string
     params?: Record<string, unknown>
-    estimate?: { toAmountMin?: string }
+    estimate?: {
+      toAmountMin?: string
+      actions?: unknown
+      feeCosts?: unknown
+      gasCosts?: unknown
+    }
     transactionRequest?: {
       target?: string
       data?: string
@@ -45,6 +52,110 @@ function amount(value: unknown, label: string): bigint {
   if (typeof value !== "string" || !/^\d+$/.test(value))
     throw new Error(`Invalid Squid route: ${label}`)
   return BigInt(value)
+}
+
+function text(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.trim() === "")
+    throw new Error(`Invalid Squid route: ${label}`)
+  return value
+}
+
+function chainId(value: unknown, label: string): number {
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0)
+    throw new Error(`Invalid Squid route: ${label}`)
+  return parsed
+}
+
+function actions(
+  value: unknown,
+  sourceChainId: number,
+  destinationChainId: number,
+): SquidRouteAction[] {
+  if (!Array.isArray(value) || value.length === 0)
+    throw new Error("Invalid Squid route: actions")
+  const parsed = value.map((item, index) => {
+    if (item == null || typeof item !== "object")
+      throw new Error(`Invalid Squid route: action ${index + 1}`)
+    const action = item as Record<string, unknown>
+    return {
+      type: text(action.type, `action ${index + 1} type`),
+      fromChainId: chainId(
+        action.fromChain,
+        `action ${index + 1} source chain`,
+      ),
+      toChainId: chainId(
+        action.toChain,
+        `action ${index + 1} destination chain`,
+      ),
+      ...(typeof action.provider === "string" && action.provider.trim() !== ""
+        ? { provider: action.provider }
+        : {}),
+      ...(typeof action.description === "string" &&
+      action.description.trim() !== ""
+        ? { description: action.description }
+        : {}),
+    }
+  })
+  if (
+    parsed[0]?.fromChainId !== sourceChainId ||
+    parsed.at(-1)?.toChainId !== destinationChainId ||
+    parsed.some(
+      (action, index) =>
+        parsed[index + 1] != null &&
+        action.toChainId !== parsed[index + 1]?.fromChainId,
+    )
+  )
+    throw new Error("Invalid Squid route: action chain mismatch")
+  return parsed
+}
+
+function costs(
+  value: unknown,
+  kind: SquidQuoteCost["kind"],
+  routeChains: ReadonlySet<number>,
+): SquidQuoteCost[] {
+  if (!Array.isArray(value))
+    throw new Error(`Invalid Squid route: ${kind} costs`)
+  return value.map((item, index) => {
+    if (item == null || typeof item !== "object")
+      throw new Error(`Invalid Squid route: ${kind} cost ${index + 1}`)
+    const cost = item as Record<string, unknown>
+    const token = cost.token
+    if (token == null || typeof token !== "object")
+      throw new Error(`Invalid Squid route: ${kind} cost ${index + 1} token`)
+    const tokenData = token as Record<string, unknown>
+    const decimals = Number(tokenData.decimals)
+    if (!Number.isSafeInteger(decimals) || decimals < 0 || decimals > 255)
+      throw new Error(
+        `Invalid Squid route: ${kind} cost ${index + 1} token decimals`,
+      )
+    const tokenChainId = chainId(
+      tokenData.chainId,
+      `${kind} cost ${index + 1} token chain`,
+    )
+    if (!routeChains.has(tokenChainId))
+      throw new Error(`Invalid Squid route: ${kind} cost chain mismatch`)
+    return {
+      kind,
+      name: text(
+        kind === "fee" ? cost.name : cost.type,
+        `${kind} cost ${index + 1} name`,
+      ),
+      amount: amount(cost.amount, `${kind} cost ${index + 1} amount`),
+      ...(typeof cost.amountUSD === "string" && cost.amountUSD.trim() !== ""
+        ? { amountUsd: cost.amountUSD }
+        : {}),
+      token: {
+        chainId: tokenChainId,
+        symbol: text(
+          tokenData.symbol,
+          `${kind} cost ${index + 1} token symbol`,
+        ),
+        decimals,
+      },
+    }
+  })
 }
 
 function sameAddress(actual: unknown, expected: Address): boolean {
@@ -190,6 +301,14 @@ export async function quoteSquidRoute(
     transaction.approvalSpender == null
       ? undefined
       : address(transaction.approvalSpender, "approval spender")
+  const routeActions = actions(
+    route.estimate?.actions,
+    input.source.chainId,
+    input.requirement.chainId,
+  )
+  const routeChains = new Set(
+    routeActions.flatMap((action) => [action.fromChainId, action.toChainId]),
+  )
   return {
     id: route.quoteId,
     requirement: input.requirement,
@@ -203,7 +322,27 @@ export async function quoteSquidRoute(
     data: transaction.data as Hex,
     value: amount(transaction.value ?? "0", "value"),
     expiresAt,
+    actions: routeActions,
+    costs: [
+      ...costs(route.estimate?.feeCosts, "fee", routeChains),
+      ...costs(route.estimate?.gasCosts, "gas", routeChains),
+    ],
   }
+}
+
+export function assertTrustedSquidQuote(
+  quote: SquidQuote,
+  trusted: { target: Address; spender?: Address },
+): SquidQuote {
+  if (
+    !sameAddress(quote.target, trusted.target) ||
+    (quote.approvalSpender == null) !== (trusted.spender == null) ||
+    (quote.approvalSpender != null &&
+      trusted.spender != null &&
+      !sameAddress(quote.approvalSpender, trusted.spender))
+  )
+    throw new Error("Squid route failed trusted target or spender checks")
+  return quote
 }
 
 export async function fetchSquidStatus(

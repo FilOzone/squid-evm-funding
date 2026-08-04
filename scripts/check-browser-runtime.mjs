@@ -11,7 +11,9 @@ const manifest = JSON.parse(
 const publishedEntry = "./dist/index.js"
 const expectedExports = [
   "NATIVE_TOKEN_ADDRESS",
+  "SQUID_ROUTER_ADDRESS",
   "SquidMinimumAmountError",
+  "assertTrustedSquidQuote",
   "executeSquidFunding",
   "fetchSourceTokens",
   "planSquidFunding",
