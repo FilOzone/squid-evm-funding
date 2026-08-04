@@ -4,9 +4,11 @@
   "files": {
     "includes": [
       "src/**",
+      "browser-check/**",
       "scripts/**",
       "package.json",
       "tsconfig.json",
+      "tsconfig.browser.json",
       "biome.json"
     ]
   },
