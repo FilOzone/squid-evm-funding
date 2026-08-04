@@ -4,7 +4,13 @@ Small TypeScript helpers for planning and executing capped EVM token routes
 through [Squid](https://www.squidrouter.com/). The package uses Squid's v2 API,
 built-in `fetch`, and caller-created [viem](https://viem.sh/) clients.
 
-Requires Node.js 24 or newer.
+## Runtime support
+
+The published ESM entry point supports modern browsers and Node.js. Browser
+builds use standard web APIs and do not require Node built-ins, `Buffer`,
+`process`, or Node polyfills. Repository development, tests, builds, and
+publishing use Node.js 24 and pnpm 10.32.1; those are tooling requirements, not
+browser runtime requirements.
 
 ```sh
 pnpm add squid-evm-funding viem
@@ -24,6 +30,39 @@ pnpm add squid-evm-funding viem
 The public API has two operations: `planSquidFunding` and
 `executeSquidFunding`. The caller owns the account, RPC URLs, trusted Squid
 addresses, fee policy, and integrator ID.
+
+### Browser wallet
+
+Use an EIP-1193 account provider through viem's `custom` transport. This is
+framework-neutral; the host application owns wallet connection UI and chain
+switching.
+
+```ts
+import { createWalletClient, custom } from "viem"
+import { arbitrum } from "viem/chains"
+
+declare const ethereum: {
+  request(args: { method: string; params?: unknown }): Promise<unknown>
+}
+
+const transport = custom(ethereum)
+const connection = createWalletClient({ chain: arbitrum, transport })
+const [owner] = await connection.requestAddresses()
+if (owner == null) throw new Error("No browser wallet account is connected")
+
+const walletClient = createWalletClient({
+  account: owner,
+  chain: arbitrum,
+  transport,
+})
+```
+
+Pass `owner` to `planSquidFunding`, and pass `walletClient` to
+`executeSquidFunding`. Source and destination public clients may use viem's
+`http` or `custom` transports. The executor verifies that the connected wallet
+address and chain match the plan before broadcasting.
+
+### Full planning and execution example
 
 ```ts
 import { executeSquidFunding, planSquidFunding } from "squid-evm-funding"
@@ -127,3 +166,11 @@ unavailable.
 The executor is stateless. A host that must block a rerun after interruption
 should place one coarse marker around `executeSquidFunding` and require manual
 verification before removing an ambiguous marker.
+
+## Browser verification
+
+`pnpm browser:check` builds the published entry point, resolves a package-root
+import under browser conditions with DOM libraries and no ambient Node types,
+scans every published JavaScript module for Node built-ins and globals, and runs
+a mocked planning/execution flow through a viem client backed by an EIP-1193
+provider.
