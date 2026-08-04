@@ -11,8 +11,12 @@ const manifest = JSON.parse(
 const publishedEntry = "./dist/index.js"
 const expectedExports = [
   "NATIVE_TOKEN_ADDRESS",
+  "SquidMinimumAmountError",
   "executeSquidFunding",
+  "fetchSourceTokens",
   "planSquidFunding",
+  "quoteSquidRoute",
+  "resolveSourceToken",
 ]
 if (
   manifest.browser !== publishedEntry ||

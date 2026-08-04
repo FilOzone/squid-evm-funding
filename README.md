@@ -27,9 +27,9 @@ pnpm add squid-evm-funding viem
 
 ## Usage
 
-The public API has two operations: `planSquidFunding` and
-`executeSquidFunding`. The caller owns the account, RPC URLs, trusted Squid
-addresses, fee policy, and integrator ID.
+The public API supports read-only catalog and quote review plus
+`planSquidFunding` and `executeSquidFunding`. The caller owns the account, RPC
+URLs, trusted Squid addresses, fee policy, and integrator ID.
 
 ### Browser wallet
 

@@ -111,11 +111,15 @@ function plan(
 }
 
 describe("Squid funding planning", () => {
-  it("keeps the runtime API to planning, execution, and the native sentinel", () => {
+  it("keeps the runtime API to catalog, quote, planning, and execution", () => {
     expect(Object.keys(library).sort()).toEqual([
       "NATIVE_TOKEN_ADDRESS",
+      "SquidMinimumAmountError",
       "executeSquidFunding",
+      "fetchSourceTokens",
       "planSquidFunding",
+      "quoteSquidRoute",
+      "resolveSourceToken",
     ])
   })
 
