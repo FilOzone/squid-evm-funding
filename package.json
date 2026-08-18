@@ -29,7 +29,7 @@
     "test": "vitest run",
     "browser:check": "node scripts/clean-dist.mjs && tsc && tsc -p tsconfig.browser.json && node --conditions=browser scripts/check-browser-runtime.mjs && vitest run src/browser.test.ts",
     "prepare": "node scripts/clean-dist.mjs && tsc",
-    "pack:check": "pnpm pack --dry-run"
+    "pack:check": "npm pack --dry-run"
   },
   "dependencies": {
     "viem": "^2.48.3"
