@@ -9,7 +9,7 @@ built-in `fetch`, and caller-created [viem](https://viem.sh/) clients.
 The published ESM entry point supports modern browsers and Node.js 18 or newer.
 Browser builds use standard web APIs and do not require Node built-ins,
 `Buffer`, `process`, or Node polyfills. Repository development, tests, builds,
-and publishing use Node.js 24 and pnpm 10.32.1; those are tooling requirements,
+and publishing use Node.js 24 and pnpm 9.15.2; those are tooling requirements,
 not the package's minimum Node runtime.
 
 ```sh
