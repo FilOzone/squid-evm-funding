@@ -3,7 +3,7 @@
   "version": "0.1.3",
   "description": "Minimal helpers for acquiring exact EVM token shortfalls through Squid",
   "type": "module",
-  "packageManager": "pnpm@10.32.1",
+  "packageManager": "pnpm@9.15.2",
   "main": "./dist/index.js",
   "browser": "./dist/index.js",
   "types": "./dist/index.d.ts",
