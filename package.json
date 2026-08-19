@@ -20,7 +20,7 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE.md"
   ],
   "engines": {
     "node": ">=18"
@@ -42,5 +42,6 @@
     "@types/node": "^24.0.0",
     "typescript": "^5.9.3",
     "vitest": "^4.0.18"
-  }
+  },
+  "license": "Apache-2.0 OR MIT"
 }
