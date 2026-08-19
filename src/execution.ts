@@ -243,6 +243,7 @@ export async function executeSquidFunding(
   const now = () => Math.floor((dependencies.squid.now ?? Date.now)() / 1000)
   let totalNativeFee = 0n
   let committed = false
+  let activeTransactionHash: Hash | undefined
   const routes: Array<{ requirementId: string; transactionHash: Hash }> = []
   const send = async (
     transaction: Transaction,
@@ -305,13 +306,16 @@ export async function executeSquidFunding(
     if ((await dependencies.walletClient.getChainId()) !== plan.source.chainId)
       throw new Error("Wallet chain does not match the Squid source chain")
     validate?.()
-    totalNativeFee += prepared.fee
     const transactionHash = (await dependencies.walletClient.sendTransaction({
       ...prepared.request,
       account: dependencies.walletClient.account,
       chain: undefined,
     } as never)) as Hash
+    // The broadcast is the commitment point: record the hash and fee here
+    // so a revert or receipt failure still reports what went on-chain.
     committed = true
+    activeTransactionHash = transactionHash
+    totalNativeFee += prepared.fee
     const receipt = await dependencies.publicClient.waitForTransactionReceipt({
       hash: transactionHash,
     })
@@ -319,7 +323,6 @@ export async function executeSquidFunding(
     return transactionHash
   }
 
-  let activeTransactionHash: Hash | undefined
   const executeQuote = async (planned: SquidQuote, index: number) => {
     let refreshed = await refresh(planned)
     assertQuote(
@@ -419,7 +422,6 @@ export async function executeSquidFunding(
           now(),
         ),
     )
-    activeTransactionHash = transactionHash
     let complete = false
     for (let attempt = 0; attempt < input.maxPollAttempts; attempt += 1) {
       // The source transaction is already committed here, so a failed

@@ -665,6 +665,37 @@ describe("guarded Squid execution", () => {
     expect(untouched).not.toBeInstanceOf(SquidExecutionError)
     expect((untouched as Error).message).toContain("total-native-fee cap")
     expect(preCommit.calls.send).toBe(0)
+
+    const reverts = clients({ allowance: 10n, reverted: true })
+    const reverted = await executeSquidFunding(
+      input(),
+      dependencies(reverts),
+    ).catch((error: unknown) => error)
+    if (!(reverted instanceof SquidExecutionError))
+      throw new Error("Expected a SquidExecutionError")
+    expect(reverted.transactionHash).toBe(`0x${"1".padStart(64, "a")}`)
+    expect(reverted.nativeFee).toBe(6n)
+    expect((reverted.cause as Error).message).toBe("Transaction reverted")
+
+    const rejectsRoute = clients()
+    const walletSend = rejectsRoute.wallet.sendTransaction.bind(
+      rejectsRoute.wallet,
+    )
+    rejectsRoute.wallet.sendTransaction = (async (
+      request: Record<string, unknown>,
+    ) => {
+      if (rejectsRoute.calls.send >= 1) throw new Error("User rejected")
+      return walletSend(request as never)
+    }) as SquidWalletClient["sendTransaction"]
+    const rejected = await executeSquidFunding(
+      input(),
+      dependencies(rejectsRoute),
+    ).catch((error: unknown) => error)
+    if (!(rejected instanceof SquidExecutionError))
+      throw new Error("Expected a SquidExecutionError")
+    expect(rejected.transactionHash).toBe(`0x${"1".padStart(64, "a")}`)
+    expect(rejected.nativeFee).toBe(6n)
+    expect((rejected.cause as Error).message).toBe("User rejected")
   })
 
   it("treats status 404s, thrown fetches, and failed balance reads as pending", async () => {

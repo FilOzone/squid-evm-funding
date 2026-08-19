@@ -180,8 +180,9 @@ verification before removing an ambiguous marker.
 When execution fails after any transaction has been broadcast, the executor
 throws `SquidExecutionError`. It carries `completedRoutes` (requirement IDs and
 transaction hashes of finished legs), `requirementId` for the failed leg,
-`transactionHash` for that leg when its route transaction was broadcast,
-`nativeFee` committed so far, and the underlying error as `cause`. Failures
+`transactionHash` of the most recently broadcast transaction for that leg (an
+approval or the route itself), `nativeFee` committed to broadcast transactions
+so far, and the underlying error as `cause`. Failures
 before any broadcast throw plain errors because nothing has changed on-chain.
 
 ## Browser verification
