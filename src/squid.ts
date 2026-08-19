@@ -37,7 +37,7 @@ function client(options: SquidClientOptions) {
   if (options.integratorId.trim() === "")
     throw new Error("Squid integrator ID is required")
   return {
-    fetch: options.fetch ?? globalThis.fetch,
+    fetch: options.fetch ?? globalThis.fetch.bind(globalThis),
     baseUrl: options.baseUrl ?? DEFAULT_BASE_URL,
   }
 }
