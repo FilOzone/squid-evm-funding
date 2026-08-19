@@ -6,7 +6,7 @@ import {
   quoteSquidRoute,
   resolveSourceToken,
   SQUID_ROUTER_ADDRESS,
-} from "squid-evm-funding"
+} from "@filecoin-project/squid-evm-funding"
 import { createWalletClient, custom } from "viem"
 import { arbitrum } from "viem/chains"
 

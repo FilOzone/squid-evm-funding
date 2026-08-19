@@ -1,7 +1,10 @@
 {
-  "name": "squid-evm-funding",
-  "version": "0.1.6-vercel.1",
+  "name": "@filecoin-project/squid-evm-funding",
+  "version": "0.1.4",
   "description": "Minimal helpers for acquiring exact EVM token shortfalls through Squid",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "packageManager": "pnpm@9.15.2",
   "main": "./dist/index.js",
@@ -28,7 +31,7 @@
     "lint": "biome check .",
     "test": "vitest run",
     "browser:check": "node scripts/clean-dist.mjs && tsc && tsc -p tsconfig.browser.json && node --conditions=browser scripts/check-browser-runtime.mjs && vitest run src/browser.test.ts",
-    "prepack": "node scripts/clean-dist.mjs && tsc",
+    "prepare": "node scripts/clean-dist.mjs && tsc",
     "pack:check": "npm pack --dry-run"
   },
   "dependencies": {

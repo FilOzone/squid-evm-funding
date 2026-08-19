@@ -13,7 +13,7 @@ and publishing use Node.js 24 and pnpm 9.15.2; those are tooling requirements,
 not the package's minimum Node runtime.
 
 ```sh
-pnpm add squid-evm-funding viem
+pnpm add @filecoin-project/squid-evm-funding viem
 ```
 
 ## Terms
@@ -72,7 +72,10 @@ address and chain match the plan before broadcasting.
 ### Full planning and execution example
 
 ```ts
-import { executeSquidFunding, planSquidFunding } from "squid-evm-funding"
+import {
+  executeSquidFunding,
+  planSquidFunding,
+} from "@filecoin-project/squid-evm-funding"
 import {
   createPublicClient,
   createWalletClient,
