@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7](https://github.com/FilOzone/squid-evm-funding/compare/v0.1.6...v0.1.7) (2026-08-19)
+
+
+### Bug Fixes
+
+* declare repository metadata for npm provenance ([#25](https://github.com/FilOzone/squid-evm-funding/issues/25)) ([89a2022](https://github.com/FilOzone/squid-evm-funding/commit/89a202231b5411b302305ef2ccb2876df348bc39))
+
 ## [0.1.6](https://github.com/FilOzone/squid-evm-funding/compare/v0.1.5...v0.1.6) (2026-08-19)
 
 
