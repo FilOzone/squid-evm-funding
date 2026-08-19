@@ -43,5 +43,13 @@
     "typescript": "^5.9.3",
     "vitest": "^4.0.18"
   },
-  "license": "Apache-2.0 OR MIT"
+  "license": "Apache-2.0 OR MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FilOzone/squid-evm-funding.git"
+  },
+  "homepage": "https://github.com/FilOzone/squid-evm-funding#readme",
+  "bugs": {
+    "url": "https://github.com/FilOzone/squid-evm-funding/issues"
+  }
 }
