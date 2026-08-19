@@ -365,6 +365,9 @@ export async function fetchSquidStatus(
     `${configured.baseUrl}/status?${query}`,
     { headers: { "x-integrator-id": options.integratorId } },
   )
+  // Squid returns 404 until its indexer sees the source transaction,
+  // usually 5-10 seconds after execution and longer on Filecoin.
+  if (response.status === 404) return "pending"
   if (!response.ok)
     throw new Error(`Squid status request failed (${response.status})`)
   const value = await response.json()
