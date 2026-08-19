@@ -1,5 +1,5 @@
 export { resolveSourceToken } from "./catalog.js"
-export { executeSquidFunding } from "./execution.js"
+export { executeSquidFunding, SquidExecutionError } from "./execution.js"
 export { planSquidFunding } from "./planner.js"
 export {
   assertTrustedSquidQuote,

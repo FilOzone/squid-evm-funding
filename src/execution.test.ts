@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
   executeSquidFunding,
   NATIVE_TOKEN_ADDRESS,
+  SquidExecutionError,
   type SquidFundingPlan,
   type SquidPublicClient,
   type SquidQuote,
@@ -613,6 +614,57 @@ describe("guarded Squid execution", () => {
       ),
     ).rejects.toThrow("route failed")
     expect(secondFails.calls.send).toBe(2)
+  })
+
+  it("reports committed state when execution fails after a broadcast", async () => {
+    const twoLegs = plan(
+      [quote(), quote({ requirement: { ...quote().requirement, id: "two" } })],
+      {
+        source: {
+          chainId: 1,
+          token: NATIVE_TOKEN_ADDRESS,
+          symbol: "ETH",
+          decimals: 18,
+        },
+      },
+    )
+    const secondFails = clients({ destinationBalances: [0n, 10n, 0n, 0n] })
+    const failure = await executeSquidFunding(
+      input(twoLegs),
+      dependencies(secondFails, provider({ statuses: ["success", "failed"] })),
+    ).catch((error: unknown) => error)
+    if (!(failure instanceof SquidExecutionError))
+      throw new Error("Expected a SquidExecutionError")
+    expect(failure.requirementId).toBe("two")
+    expect(failure.transactionHash).toBe(`0x${"2".padStart(64, "a")}`)
+    expect(failure.completedRoutes).toEqual([
+      { requirementId: "fund", transactionHash: `0x${"1".padStart(64, "a")}` },
+    ])
+    expect(failure.nativeFee).toBe(12n)
+    expect((failure.cause as Error).message).toBe("Squid route failed")
+
+    const timesOut = clients({
+      allowance: 10n,
+      destinationBalances: [0n, 9n, 9n],
+    })
+    const timeout = await executeSquidFunding(
+      input(),
+      dependencies(timesOut),
+    ).catch((error: unknown) => error)
+    if (!(timeout instanceof SquidExecutionError))
+      throw new Error("Expected a SquidExecutionError")
+    expect(timeout.completedRoutes).toEqual([])
+    expect(timeout.transactionHash).toBe(`0x${"1".padStart(64, "a")}`)
+    expect(timeout.message).toContain("poll limit")
+
+    const preCommit = clients({ allowance: 10n })
+    const untouched = await executeSquidFunding(
+      input(plan(), { maxNativeFee: 5n }),
+      dependencies(preCommit),
+    ).catch((error: unknown) => error)
+    expect(untouched).not.toBeInstanceOf(SquidExecutionError)
+    expect((untouched as Error).message).toContain("total-native-fee cap")
+    expect(preCommit.calls.send).toBe(0)
   })
 
   it("treats status 404s, thrown fetches, and failed balance reads as pending", async () => {

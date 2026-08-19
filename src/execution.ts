@@ -19,6 +19,34 @@ import {
 type Transaction = { to: Address; data: Hex; value: bigint }
 const MAX_POLL_INTERVAL_MS = 2_147_483_647
 
+export class SquidExecutionError extends Error {
+  readonly requirementId: string
+  readonly transactionHash?: Hash
+  readonly completedRoutes: SquidExecutionResult["routes"]
+  readonly nativeFee: bigint
+
+  constructor(
+    cause: unknown,
+    context: {
+      requirementId: string
+      transactionHash?: Hash
+      completedRoutes: SquidExecutionResult["routes"]
+      nativeFee: bigint
+    },
+  ) {
+    super(
+      `Execution failed after funds were committed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    )
+    this.name = "SquidExecutionError"
+    this.requirementId = context.requirementId
+    if (context.transactionHash != null)
+      this.transactionHash = context.transactionHash
+    this.completedRoutes = context.completedRoutes
+    this.nativeFee = context.nativeFee
+  }
+}
+
 function sameAddress(a: Address, b: Address) {
   return a.toLowerCase() === b.toLowerCase()
 }
@@ -214,6 +242,7 @@ export async function executeSquidFunding(
     )
   const now = () => Math.floor((dependencies.squid.now ?? Date.now)() / 1000)
   let totalNativeFee = 0n
+  let committed = false
   const routes: Array<{ requirementId: string; transactionHash: Hash }> = []
   const send = async (
     transaction: Transaction,
@@ -282,6 +311,7 @@ export async function executeSquidFunding(
       account: dependencies.walletClient.account,
       chain: undefined,
     } as never)) as Hash
+    committed = true
     const receipt = await dependencies.publicClient.waitForTransactionReceipt({
       hash: transactionHash,
     })
@@ -289,8 +319,8 @@ export async function executeSquidFunding(
     return transactionHash
   }
 
-  for (let index = 0; index < plan.quotes.length; index += 1) {
-    const planned = plan.quotes[index] as SquidQuote
+  let activeTransactionHash: Hash | undefined
+  const executeQuote = async (planned: SquidQuote, index: number) => {
     let refreshed = await refresh(planned)
     assertQuote(
       planned,
@@ -389,6 +419,7 @@ export async function executeSquidFunding(
           now(),
         ),
     )
+    activeTransactionHash = transactionHash
     let complete = false
     for (let attempt = 0; attempt < input.maxPollAttempts; attempt += 1) {
       // The source transaction is already committed here, so a failed
@@ -426,7 +457,27 @@ export async function executeSquidFunding(
     }
     if (!complete)
       throw new Error("Squid route did not complete within the poll limit")
-    routes.push({ requirementId: planned.requirement.id, transactionHash })
+    return transactionHash
+  }
+
+  for (let index = 0; index < plan.quotes.length; index += 1) {
+    const planned = plan.quotes[index] as SquidQuote
+    activeTransactionHash = undefined
+    try {
+      const transactionHash = await executeQuote(planned, index)
+      routes.push({ requirementId: planned.requirement.id, transactionHash })
+    } catch (error) {
+      // Before the first broadcast nothing is committed on-chain, so plain
+      // errors stay plain; after it the host needs the committed state to
+      // recover.
+      if (!committed) throw error
+      throw new SquidExecutionError(error, {
+        requirementId: planned.requirement.id,
+        transactionHash: activeTransactionHash,
+        completedRoutes: [...routes],
+        nativeFee: totalNativeFee,
+      })
+    }
   }
   return { sourceAmount, nativeFee: totalNativeFee, routes }
 }
