@@ -143,6 +143,7 @@ describe("Squid funding planning", () => {
     expect(Object.keys(library).sort()).toEqual([
       "NATIVE_TOKEN_ADDRESS",
       "SQUID_ROUTER_ADDRESS",
+      "SquidExecutionError",
       "SquidMinimumAmountError",
       "assertTrustedSquidQuote",
       "executeSquidFunding",

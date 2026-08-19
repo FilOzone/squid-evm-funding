@@ -177,6 +177,14 @@ The executor is stateless. A host that must block a rerun after interruption
 should place one coarse marker around `executeSquidFunding` and require manual
 verification before removing an ambiguous marker.
 
+When execution fails after any transaction has been broadcast, the executor
+throws `SquidExecutionError`. It carries `completedRoutes` (requirement IDs and
+transaction hashes of finished legs), `requirementId` for the failed leg,
+`transactionHash` of the most recently broadcast transaction for that leg (an
+approval or the route itself), `nativeFee` committed to broadcast transactions
+so far, and the underlying error as `cause`. Failures
+before any broadcast throw plain errors because nothing has changed on-chain.
+
 ## Browser verification
 
 `pnpm browser:check` builds the published entry point, resolves a package-root
