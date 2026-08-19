@@ -65,6 +65,9 @@ function provider(
     if (String(url).includes("/status?")) {
       const statuses = options.statuses ?? ["success"]
       const status = statuses[Math.min(statusCalls++, statuses.length - 1)]
+      if (status === "http-404")
+        return new Response("not found", { status: 404 })
+      if (status === "network-error") throw new Error("status fetch failed")
       return new Response(JSON.stringify({ squidTransactionStatus: status }))
     }
     const request = JSON.parse(String(init?.body)) as {
@@ -117,6 +120,7 @@ function clients(
     sourceTokenBalance?: bigint
     nativeBalance?: bigint
     destinationBalances?: bigint[]
+    failDestinationReads?: number[]
     pending?: boolean
     nonceDrift?: boolean
     walletDrift?: boolean
@@ -162,23 +166,18 @@ function clients(
       status: options.reverted ? "reverted" : "success",
     }),
   } as unknown as SquidPublicClient
+  const destinationBalance = async () => {
+    const index = destinationRead++
+    if ((options.failDestinationReads ?? []).includes(index))
+      throw new Error("destination RPC unavailable")
+    const balances = options.destinationBalances ?? [0n, 10n]
+    return balances[Math.min(index, balances.length - 1)] as bigint
+  }
   const destination = {
     ...source,
     getChainId: async () => 314,
-    getBalance: async () =>
-      (options.destinationBalances ?? [0n, 10n])[
-        Math.min(
-          destinationRead++,
-          (options.destinationBalances ?? [0n, 10n]).length - 1,
-        )
-      ] as bigint,
-    readContract: async () =>
-      (options.destinationBalances ?? [0n, 10n])[
-        Math.min(
-          destinationRead++,
-          (options.destinationBalances ?? [0n, 10n]).length - 1,
-        )
-      ] as bigint,
+    getBalance: destinationBalance,
+    readContract: destinationBalance,
   } as unknown as SquidPublicClient
   const wallet = {
     account: { address: owner, type: "json-rpc" } as Account,
@@ -614,6 +613,49 @@ describe("guarded Squid execution", () => {
       ),
     ).rejects.toThrow("route failed")
     expect(secondFails.calls.send).toBe(2)
+  })
+
+  it("treats status 404s, thrown fetches, and failed balance reads as pending", async () => {
+    const indexingDelay = clients({ allowance: 10n })
+    await expect(
+      executeSquidFunding(
+        input(plan(), { maxPollAttempts: 3 }),
+        dependencies(
+          indexingDelay,
+          provider({ statuses: ["http-404", "http-404", "success"] }),
+        ),
+      ),
+    ).resolves.toMatchObject({ sourceAmount: 10n })
+
+    const transientFetch = clients({ allowance: 10n })
+    await expect(
+      executeSquidFunding(
+        input(plan(), { maxPollAttempts: 2 }),
+        dependencies(
+          transientFetch,
+          provider({ statuses: ["network-error", "success"] }),
+        ),
+      ),
+    ).resolves.toMatchObject({ sourceAmount: 10n })
+
+    const transientBalance = clients({
+      allowance: 10n,
+      failDestinationReads: [1],
+    })
+    await expect(
+      executeSquidFunding(
+        input(plan(), { maxPollAttempts: 2 }),
+        dependencies(transientBalance),
+      ),
+    ).resolves.toMatchObject({ sourceAmount: 10n })
+
+    const neverIndexed = clients({ allowance: 10n })
+    await expect(
+      executeSquidFunding(
+        input(plan(), { maxPollAttempts: 2 }),
+        dependencies(neverIndexed, provider({ statuses: ["http-404"] })),
+      ),
+    ).rejects.toThrow("poll limit")
   })
 
   it("supports Filecoin/native sources and native destination balances with floors", async () => {

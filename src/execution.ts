@@ -391,7 +391,10 @@ export async function executeSquidFunding(
     )
     let complete = false
     for (let attempt = 0; attempt < input.maxPollAttempts; attempt += 1) {
-      const [routeStatus, after] = await Promise.all([
+      // The source transaction is already committed here, so a failed
+      // status or balance read only spends a poll attempt; it must never
+      // abandon a route that may still complete.
+      const [statusResult, balanceResult] = await Promise.allSettled([
         fetchSquidStatus(
           {
             quoteId: refreshed.id,
@@ -407,8 +410,14 @@ export async function executeSquidFunding(
           planned.requirement.recipient,
         ),
       ])
+      const routeStatus =
+        statusResult.status === "fulfilled" ? statusResult.value : "pending"
       if (routeStatus === "failed") throw new Error("Squid route failed")
-      if (routeStatus === "success" && after >= before) {
+      if (
+        routeStatus === "success" &&
+        balanceResult.status === "fulfilled" &&
+        balanceResult.value >= before
+      ) {
         complete = true
         break
       }

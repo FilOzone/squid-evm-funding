@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import * as library from "./index.js"
 import {
   assertTrustedSquidQuote,
@@ -151,6 +151,20 @@ describe("Squid funding planning", () => {
       "quoteSquidRoute",
       "resolveSourceToken",
     ])
+  })
+
+  it("binds the default fetch implementation to the global scope", async () => {
+    vi.stubGlobal("fetch", async function (this: unknown) {
+      expect(this).toBe(globalThis)
+      return new Response(JSON.stringify({ tokens: [] }))
+    })
+    try {
+      await expect(
+        library.fetchSourceTokens(1, { integratorId: "test" }),
+      ).resolves.toEqual([])
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it("returns review metadata and rejects an unexpected target or spender", async () => {
