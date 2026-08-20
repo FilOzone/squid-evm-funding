@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/FilOzone/squid-evm-funding/compare/v0.2.1...v0.2.2) (2026-08-20)
+
+
+### Bug Fixes
+
+* stop planning at the first sufficient quote ([#32](https://github.com/FilOzone/squid-evm-funding/issues/32)) ([129eaf1](https://github.com/FilOzone/squid-evm-funding/commit/129eaf1efa991866f3bef3c1114bce5397647fec))
+
 ## [0.2.1](https://github.com/FilOzone/squid-evm-funding/compare/v0.2.0...v0.2.1) (2026-08-20)
 
 
