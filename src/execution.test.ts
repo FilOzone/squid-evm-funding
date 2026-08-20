@@ -4,8 +4,8 @@ import {
   executeSquidFunding,
   NATIVE_TOKEN_ADDRESS,
   type SquidFundingPlan,
+  type SquidPriceQuote,
   type SquidPublicClient,
-  type SquidQuote,
   type SquidWalletClient,
 } from "./index.js"
 
@@ -15,7 +15,7 @@ const destinationToken = "0x3333333333333333333333333333333333333333" as const
 const target = "0x4444444444444444444444444444444444444444" as const
 const spender = "0x5555555555555555555555555555555555555555" as const
 
-function quote(overrides: Partial<SquidQuote> = {}): SquidQuote {
+function quote(overrides: Partial<SquidPriceQuote> = {}): SquidPriceQuote {
   return {
     id: "planned",
     requirement: {
@@ -27,17 +27,14 @@ function quote(overrides: Partial<SquidQuote> = {}): SquidQuote {
     },
     sourceAmount: 10n,
     destinationAmount: 10n,
-    target,
-    approvalSpender: spender,
-    data: "0x01",
-    value: 0n,
-    expiresAt: 2_000_000_000,
+    actions: [],
+    costs: [],
     ...overrides,
   }
 }
 
 function plan(
-  quotes: readonly SquidQuote[] = [quote()],
+  quotes: readonly SquidPriceQuote[] = [quote()],
   overrides: Partial<SquidFundingPlan> = {},
 ): SquidFundingPlan {
   return {
@@ -265,15 +262,18 @@ describe("guarded Squid execution", () => {
       expect.objectContaining({ to: sourceToken, gas: 2n, maxFeePerGas: 3n }),
     )
     expect(mocked.calls.sent[1]).toEqual(
-      expect.objectContaining({ to: target, data: "0x02", value: 0n }),
+      expect.objectContaining({ to: target, data: "0x01", value: 0n }),
     )
     expect(mocked.calls.sent[1]?.account).toBe(mocked.wallet.account)
+    expect(squid.routeCalls()).toBe(1)
   })
 
   it("resets an overbroad allowance before setting the exact amount", async () => {
     const mocked = clients({ allowance: 100n })
-    await executeSquidFunding(input(), dependencies(mocked))
+    const squid = provider()
+    await executeSquidFunding(input(), dependencies(mocked, squid))
     expect(mocked.calls.send).toBe(3)
+    expect(squid.routeCalls()).toBe(1)
     const approvals = mocked.calls.sent.slice(0, 2).map((request) =>
       decodeFunctionData({
         abi: erc20Abi,
@@ -286,7 +286,6 @@ describe("guarded Squid execution", () => {
   it("rejects refreshed trust-boundary changes before a route broadcast", async () => {
     const cases: Array<{
       name: string
-      planned?: Partial<SquidQuote>
       mutate: (route: Record<string, unknown>) => void
     }> = [
       {
@@ -311,7 +310,6 @@ describe("guarded Squid execution", () => {
       },
       {
         name: "missing spender",
-        planned: { approvalSpender: spender },
         mutate: (route) => {
           const transaction = route.transactionRequest as Record<
             string,
@@ -336,7 +334,7 @@ describe("guarded Squid execution", () => {
       const squid = provider({ mutateRoute: item.mutate })
       await expect(
         executeSquidFunding(
-          input(plan([quote(item.planned)])),
+          input(plan([quote()])),
           dependencies(mocked, squid),
         ),
         item.name,
@@ -664,7 +662,6 @@ describe("guarded Squid execution", () => {
         ...quote().requirement,
         token: NATIVE_TOKEN_ADDRESS,
       },
-      value: 10n,
     })
     const nativePlan = plan([nativeQuote], {
       source: {

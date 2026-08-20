@@ -4,6 +4,7 @@ import {
   assertTrustedSquidQuote,
   NATIVE_TOKEN_ADDRESS,
   planSquidFunding,
+  quoteSquidRoute,
 } from "./index.js"
 
 const owner = "0x1111111111111111111111111111111111111111" as const
@@ -84,14 +85,18 @@ function route(
         ],
         gasCosts: [],
       },
-      transactionRequest: {
-        target,
-        approvalSpender: spender,
-        data: "0x01",
-        value:
-          request.fromToken === NATIVE_TOKEN_ADDRESS ? request.fromAmount : "0",
-        expiry: "2000000000",
-      },
+      transactionRequest: request.quoteOnly
+        ? {}
+        : {
+            target,
+            approvalSpender: spender,
+            data: "0x01",
+            value:
+              request.fromToken === NATIVE_TOKEN_ADDRESS
+                ? request.fromAmount
+                : "0",
+            expiry: "2000000000",
+          },
     },
   }
   mutate?.(value)
@@ -138,6 +143,29 @@ function plan(
   )
 }
 
+function executableQuote(mocked: ReturnType<typeof api>) {
+  return quoteSquidRoute(
+    {
+      owner,
+      source: {
+        chainId: 1,
+        token: sourceToken,
+        symbol: "USDC",
+        decimals: 6,
+      },
+      requirement: requirement(),
+      sourceAmount: 10n,
+      slippage: 1,
+    },
+    {
+      integratorId: "test",
+      baseUrl: "https://example.test/v2",
+      fetch: mocked.fetch,
+      now: () => 0,
+    },
+  )
+}
+
 describe("Squid funding planning", () => {
   it("keeps the runtime API to catalog, quote, planning, and execution", () => {
     expect(Object.keys(library).sort()).toEqual([
@@ -167,8 +195,9 @@ describe("Squid funding planning", () => {
     }
   })
 
-  it("returns review metadata and rejects an unexpected target or spender", async () => {
-    const [quote] = (await plan(api({}))).quotes
+  it("uses price-only routes for planning and returns review metadata", async () => {
+    const mocked = api({})
+    const [quote] = (await plan(mocked)).quotes
     expect(quote?.actions).toEqual([
       {
         type: "bridge",
@@ -187,7 +216,21 @@ describe("Squid funding planning", () => {
         token: { chainId: 1, symbol: "USDC", decimals: 6 },
       },
     ])
-    if (quote == null) throw new Error("Expected a Squid quote")
+    expect(
+      mocked.requests
+        .filter(({ url }) => url.endsWith("/route"))
+        .map(
+          ({ init }) =>
+            (JSON.parse(String(init?.body)) as RouteRequest).quoteOnly,
+        ),
+    ).toEqual([true, true])
+    expect(quote).not.toHaveProperty("transactionRequest")
+    expect(quote).not.toHaveProperty("target")
+  })
+
+  it("requests and validates executable routes only when explicitly asked", async () => {
+    const mocked = api({})
+    const quote = await executableQuote(mocked)
     expect(assertTrustedSquidQuote(quote, { target, spender })).toBe(quote)
     expect(() =>
       assertTrustedSquidQuote(quote, {
@@ -195,6 +238,10 @@ describe("Squid funding planning", () => {
         spender,
       }),
     ).toThrow("trusted target or spender")
+    const request = JSON.parse(
+      String(mocked.requests.at(-1)?.init?.body),
+    ) as RouteRequest
+    expect(request.quoteOnly).toBe(false)
   })
 
   it("fetches only tokens and resolves a symbol, address, or native token", async () => {
@@ -294,7 +341,7 @@ describe("Squid funding planning", () => {
     expect(exhausted.routeCalls()).toBe(3)
   })
 
-  it("keeps route request identity and executable fields fail closed", async () => {
+  it("keeps price request identity and displayed fields fail closed", async () => {
     const identityChanges: Array<[string, unknown]> = [
       ["fromChain", "10"],
       ["fromToken", target],
@@ -304,7 +351,7 @@ describe("Squid funding planning", () => {
       ["toToken", target],
       ["toAddress", target],
       ["slippage", 2],
-      ["quoteOnly", true],
+      ["quoteOnly", false],
     ]
     for (const [key, changed] of identityChanges) {
       const mocked = api({
@@ -319,28 +366,6 @@ describe("Squid funding planning", () => {
       await expect(plan(mocked)).rejects.toThrow("Invalid Squid route")
     }
 
-    const transactionChanges: Array<[string, unknown]> = [
-      ["target", "bad"],
-      ["approvalSpender", "bad"],
-      ["data", "0x0"],
-      ["value", "-1"],
-      ["expiry", "0"],
-    ]
-    for (const [key, changed] of transactionChanges)
-      await expect(
-        plan(
-          api({
-            route: (request) =>
-              route(request, 10n, (value) => {
-                const routeValue = value.route as {
-                  transactionRequest: Record<string, unknown>
-                }
-                routeValue.transactionRequest[key] = changed
-              }),
-          }),
-        ),
-      ).rejects.toThrow("Invalid Squid route")
-
     for (const [key, changed] of [
       ["actions", []],
       ["feeCosts", [{ amount: "-1" }]],
@@ -354,6 +379,30 @@ describe("Squid funding planning", () => {
                   estimate: Record<string, unknown>
                 }
                 routeValue.estimate[key] = changed
+              }),
+          }),
+        ),
+      ).rejects.toThrow("Invalid Squid route")
+  })
+
+  it("keeps executable route fields fail closed", async () => {
+    const transactionChanges: Array<[string, unknown]> = [
+      ["target", "bad"],
+      ["approvalSpender", "bad"],
+      ["data", "0x0"],
+      ["value", "-1"],
+      ["expiry", "0"],
+    ]
+    for (const [key, changed] of transactionChanges)
+      await expect(
+        executableQuote(
+          api({
+            route: (request) =>
+              route(request, 10n, (value) => {
+                const routeValue = value.route as {
+                  transactionRequest: Record<string, unknown>
+                }
+                routeValue.transactionRequest[key] = changed
               }),
           }),
         ),
@@ -430,27 +479,7 @@ describe("Squid funding planning", () => {
     await expect(plan(transient)).rejects.toThrow("quote failed (503)")
   })
 
-  it("rejects expired multi-leg plans and retains a feasible fourth quote", async () => {
-    const expired = api({})
-    let nowCalls = 0
-    await expect(
-      planSquidFunding(
-        {
-          owner,
-          sourceChainId: 1,
-          sourceToken: "USDC",
-          requirements: [requirement("a"), requirement("b")],
-          maxSourceAmount: "1",
-          slippage: 1,
-        },
-        {
-          integratorId: "test",
-          fetch: expired.fetch,
-          now: () => (nowCalls++ < 4 ? 0 : 2_000_000_000_000),
-        },
-      ),
-    ).rejects.toThrow("expired")
-
+  it("retains a feasible fourth price quote", async () => {
     const outputs = [1_000_000n, 20n, 9n, 10n]
     const converges = api({
       route: (request, call) => route(request, outputs[call - 1] as bigint),

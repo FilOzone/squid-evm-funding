@@ -48,24 +48,27 @@ export interface SquidQuoteCost {
   }
 }
 
-export interface SquidQuote {
+export interface SquidPriceQuote {
   id: string
   requirement: DestinationRequirement
   sourceAmount: bigint
   destinationAmount: bigint
+  actions: readonly SquidRouteAction[]
+  costs: readonly SquidQuoteCost[]
+}
+
+export interface SquidQuote extends SquidPriceQuote {
   target: Address
   approvalSpender?: Address
   data: Hex
   value: bigint
   expiresAt: number
-  actions: readonly SquidRouteAction[]
-  costs: readonly SquidQuoteCost[]
 }
 
 export interface SquidFundingPlan {
   owner: Address
   source: SourceToken
-  quotes: readonly SquidQuote[]
+  quotes: readonly SquidPriceQuote[]
   maxSourceAmount: bigint
   slippage: number
 }

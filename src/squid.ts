@@ -4,6 +4,7 @@ import type {
   DestinationRequirement,
   SourceToken,
   SquidClientOptions,
+  SquidPriceQuote,
   SquidQuote,
   SquidQuoteCost,
   SquidRouteAction,
@@ -202,16 +203,24 @@ export async function fetchSourceTokens(
   return parseSourceTokens(await response.json(), sourceChainId)
 }
 
-export async function quoteSquidRoute(
-  input: {
-    owner: Address
-    source: SourceToken
-    requirement: DestinationRequirement
-    sourceAmount: bigint
-    slippage: number
-  },
+type QuoteInput = {
+  owner: Address
+  source: SourceToken
+  requirement: DestinationRequirement
+  sourceAmount: bigint
+  slippage: number
+}
+
+async function requestSquidQuote(
+  input: QuoteInput,
   options: SquidClientOptions,
-): Promise<SquidQuote> {
+  quoteOnly: boolean,
+): Promise<{
+  quote: SquidPriceQuote
+  transaction?: NonNullable<
+    NonNullable<RouteWire["route"]>["transactionRequest"]
+  >
+}> {
   if (input.sourceAmount <= 0n || input.requirement.amount <= 0n)
     throw new Error("Source and destination amounts must be positive")
   if (
@@ -237,7 +246,7 @@ export async function quoteSquidRoute(
       toChain: String(input.requirement.chainId),
       toToken: input.requirement.token,
       slippage: input.slippage,
-      quoteOnly: false,
+      quoteOnly,
     }),
   })
   if (!response.ok) {
@@ -269,8 +278,8 @@ export async function quoteSquidRoute(
   if (
     typeof route?.quoteId !== "string" ||
     route.quoteId.trim() === "" ||
-    transaction == null ||
-    params == null
+    params == null ||
+    (!quoteOnly && transaction == null)
   )
     throw new Error("Invalid Squid route: missing route fields")
   if (
@@ -278,13 +287,61 @@ export async function quoteSquidRoute(
     params.fromAmount !== input.sourceAmount.toString() ||
     params.toChain !== String(input.requirement.chainId) ||
     params.slippage !== input.slippage ||
-    params.quoteOnly !== false ||
+    params.quoteOnly !== quoteOnly ||
     !sameAddress(params.fromToken, input.source.token) ||
     !sameAddress(params.toToken, input.requirement.token) ||
     !sameAddress(params.fromAddress, input.owner) ||
     !sameAddress(params.toAddress, input.requirement.recipient)
   )
     throw new Error("Invalid Squid route: request identity mismatch")
+
+  const routeActions = actions(
+    route.estimate?.actions,
+    input.source.chainId,
+    input.requirement.chainId,
+  )
+  const routeChains = new Set(
+    routeActions.flatMap((action) => [action.fromChainId, action.toChainId]),
+  )
+  return {
+    quote: {
+      id: route.quoteId,
+      requirement: input.requirement,
+      sourceAmount: input.sourceAmount,
+      destinationAmount: amount(
+        route.estimate?.toAmountMin,
+        "minimum destination amount",
+      ),
+      actions: routeActions,
+      costs: [
+        ...costs(route.estimate?.feeCosts, "fee", routeChains),
+        ...costs(route.estimate?.gasCosts, "gas", routeChains),
+      ],
+    },
+    ...(transaction == null ? {} : { transaction }),
+  }
+}
+
+export async function quoteSquidPrice(
+  input: {
+    owner: Address
+    source: SourceToken
+    requirement: DestinationRequirement
+    sourceAmount: bigint
+    slippage: number
+  },
+  options: SquidClientOptions,
+): Promise<SquidPriceQuote> {
+  return (await requestSquidQuote(input, options, true)).quote
+}
+
+export async function quoteSquidRoute(
+  input: QuoteInput,
+  options: SquidClientOptions,
+): Promise<SquidQuote> {
+  const { quote, transaction } = await requestSquidQuote(input, options, false)
+  if (transaction == null)
+    throw new Error("Invalid Squid route: missing transaction request")
   const expiresAt = Number(transaction.expiry)
   if (
     !Number.isSafeInteger(expiresAt) ||
@@ -301,32 +358,13 @@ export async function quoteSquidRoute(
     transaction.approvalSpender == null
       ? undefined
       : address(transaction.approvalSpender, "approval spender")
-  const routeActions = actions(
-    route.estimate?.actions,
-    input.source.chainId,
-    input.requirement.chainId,
-  )
-  const routeChains = new Set(
-    routeActions.flatMap((action) => [action.fromChainId, action.toChainId]),
-  )
   return {
-    id: route.quoteId,
-    requirement: input.requirement,
-    sourceAmount: input.sourceAmount,
-    destinationAmount: amount(
-      route.estimate?.toAmountMin,
-      "minimum destination amount",
-    ),
+    ...quote,
     target: address(transaction.target, "target"),
     ...(approvalSpender == null ? {} : { approvalSpender }),
     data: transaction.data as Hex,
     value: amount(transaction.value ?? "0", "value"),
     expiresAt,
-    actions: routeActions,
-    costs: [
-      ...costs(route.estimate?.feeCosts, "fee", routeChains),
-      ...costs(route.estimate?.gasCosts, "gas", routeChains),
-    ],
   }
 }
 
