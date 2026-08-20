@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/FilOzone/squid-evm-funding/compare/v0.2.0...v0.2.1) (2026-08-20)
+
+
+### Bug Fixes
+
+* retain feasible price quote during refinement ([#30](https://github.com/FilOzone/squid-evm-funding/issues/30)) ([74493f6](https://github.com/FilOzone/squid-evm-funding/commit/74493f61ae98fa495dcb17083db08bdd4085d2b4))
+
 ## [0.2.0](https://github.com/FilOzone/squid-evm-funding/compare/v0.1.7...v0.2.0) (2026-08-20)
 
 
