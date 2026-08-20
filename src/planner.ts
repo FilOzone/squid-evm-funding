@@ -12,7 +12,9 @@ import type {
   SquidPriceQuote,
 } from "./types.js"
 
-const MAX_QUOTES_PER_LEG = 4
+const BASIS_POINTS = 10_000n
+const ESTIMATE_HEADROOM_BPS = 100n
+const MAX_QUOTES_PER_LEG = 8
 
 function ceilDiv(numerator: bigint, denominator: bigint): bigint {
   return (numerator + denominator - 1n) / denominator
@@ -106,13 +108,31 @@ export async function planSquidFunding(
         (bestQuote == null || quote.sourceAmount < bestQuote.sourceAmount)
       )
         bestQuote = quote
+      if (
+        attempt > 0 &&
+        quote.destinationAmount >= requirement.amount &&
+        bestQuote != null
+      ) {
+        quotes.push(bestQuote)
+        remaining -= bestQuote.sourceAmount
+        break
+      }
       if (attempt === MAX_QUOTES_PER_LEG - 1 && bestQuote != null) {
         quotes.push(bestQuote)
         remaining -= bestQuote.sourceAmount
         break
       }
+      if (attempt === MAX_QUOTES_PER_LEG - 1)
+        throw new Error("Squid could not estimate a sufficient source amount")
+      const targetAmount =
+        quote.destinationAmount < requirement.amount
+          ? ceilDiv(
+              requirement.amount * (BASIS_POINTS + ESTIMATE_HEADROOM_BPS),
+              BASIS_POINTS,
+            )
+          : requirement.amount
       const candidate = ceilDiv(
-        sourceAmount * requirement.amount,
+        sourceAmount * targetAmount,
         quote.destinationAmount,
       )
       if (candidate === sourceAmount && bestQuote != null) {
@@ -131,10 +151,6 @@ export async function planSquidFunding(
       }
       downscaled = candidate < sourceAmount
       sourceAmount = candidate
-      if (attempt === MAX_QUOTES_PER_LEG - 1)
-        throw new Error(
-          `Squid could not converge within ${MAX_QUOTES_PER_LEG} quotes`,
-        )
     }
   }
   if (quotes.length !== input.requirements.length)
