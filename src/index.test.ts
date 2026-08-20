@@ -488,4 +488,17 @@ describe("Squid funding planning", () => {
     expect(result.quotes[0]?.destinationAmount).toBe(10n)
     expect(converges.routeCalls()).toBe(4)
   })
+
+  it("retains a feasible quote when later price refinement slips below target", async () => {
+    const outputs = [355_177n, 3_999_987n, 4_000_001n, 3_999_999n]
+    const fluctuates = api({
+      route: (request, call) => route(request, outputs[call - 1] as bigint),
+    })
+    const result = await plan(fluctuates, {
+      requirements: [requirement("fund", 4_000_000n)],
+      maxSourceAmount: "10",
+    })
+    expect(result.quotes[0]?.destinationAmount).toBe(4_000_001n)
+    expect(fluctuates.routeCalls()).toBe(4)
+  })
 })
