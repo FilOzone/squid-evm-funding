@@ -68,6 +68,7 @@ export async function planSquidFunding(
     if (remaining <= 0n)
       throw new Error("Acquisition would exceed the source-token cap")
     let sourceAmount = seed < remaining ? seed : remaining
+    let bestQuote: SquidPriceQuote | undefined
     let downscaled = false
     for (let attempt = 0; attempt < MAX_QUOTES_PER_LEG; attempt += 1) {
       let quote: SquidPriceQuote
@@ -101,23 +102,22 @@ export async function planSquidFunding(
       if (quote.destinationAmount <= 0n)
         throw new Error("Squid returned zero minimum destination amount")
       if (
-        attempt === MAX_QUOTES_PER_LEG - 1 &&
-        quote.destinationAmount >= requirement.amount
-      ) {
-        quotes.push(quote)
-        remaining -= sourceAmount
+        quote.destinationAmount >= requirement.amount &&
+        (bestQuote == null || quote.sourceAmount < bestQuote.sourceAmount)
+      )
+        bestQuote = quote
+      if (attempt === MAX_QUOTES_PER_LEG - 1 && bestQuote != null) {
+        quotes.push(bestQuote)
+        remaining -= bestQuote.sourceAmount
         break
       }
       const candidate = ceilDiv(
         sourceAmount * requirement.amount,
         quote.destinationAmount,
       )
-      if (
-        candidate === sourceAmount &&
-        quote.destinationAmount >= requirement.amount
-      ) {
-        quotes.push(quote)
-        remaining -= sourceAmount
+      if (candidate === sourceAmount && bestQuote != null) {
+        quotes.push(bestQuote)
+        remaining -= bestQuote.sourceAmount
         break
       }
       if (candidate <= 0n)
