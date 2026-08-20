@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/FilOzone/squid-evm-funding/compare/v0.1.7...v0.2.0) (2026-08-20)
+
+
+### Bug Fixes
+
+* use price-only routes during planning ([#28](https://github.com/FilOzone/squid-evm-funding/issues/28)) ([aaa9893](https://github.com/FilOzone/squid-evm-funding/commit/aaa98939b64e9d56e20e58197654c71e0394da69))
+
 ## [0.1.7](https://github.com/FilOzone/squid-evm-funding/compare/v0.1.6...v0.1.7) (2026-08-19)
 
 
