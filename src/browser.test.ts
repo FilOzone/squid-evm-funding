@@ -42,7 +42,8 @@ function browserProvider() {
 
 function squidFetch() {
   let routeCalls = 0
-  return (async (input, init) => {
+  const quoteOnlyRequests: boolean[] = []
+  const fetch = (async (input, init) => {
     const url = String(input)
     if (url.endsWith("/tokens"))
       return new Response(
@@ -72,6 +73,7 @@ function squidFetch() {
       slippage: number
       quoteOnly: boolean
     }
+    quoteOnlyRequests.push(request.quoteOnly)
     return new Response(
       JSON.stringify({
         route: {
@@ -89,17 +91,20 @@ function squidFetch() {
             feeCosts: [],
             gasCosts: [],
           },
-          transactionRequest: {
-            target,
-            approvalSpender: spender,
-            data: "0x01",
-            value: request.fromAmount,
-            expiry: "2000000000",
-          },
+          transactionRequest: request.quoteOnly
+            ? {}
+            : {
+                target,
+                approvalSpender: spender,
+                data: "0x01",
+                value: request.fromAmount,
+                expiry: "2000000000",
+              },
         },
       }),
     )
   }) as typeof globalThis.fetch
+  return { fetch, quoteOnlyRequests }
 }
 
 describe("browser package support", () => {
@@ -137,10 +142,11 @@ describe("browser package support", () => {
       getChainId: async () => 314,
       readContract: async () => (destinationReads++ === 0 ? 0n : 10n),
     } as unknown as SquidPublicClient
+    const squidApi = squidFetch()
     const squid = {
       integratorId: "browser-test",
       baseUrl: "https://example.test/v2",
-      fetch: squidFetch(),
+      fetch: squidApi.fetch,
       now: () => 0,
     }
 
@@ -206,5 +212,6 @@ describe("browser package support", () => {
         maxPriorityFeePerGas: "0x1",
       }),
     ])
+    expect(squidApi.quoteOnlyRequests).toEqual([true, false])
   })
 })

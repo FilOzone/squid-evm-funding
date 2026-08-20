@@ -2,14 +2,14 @@ import { type Address, parseUnits } from "viem"
 import { resolveSourceToken } from "./catalog.js"
 import {
   fetchSourceTokens,
-  quoteSquidRoute,
+  quoteSquidPrice,
   SquidMinimumAmountError,
 } from "./squid.js"
 import type {
   DestinationRequirement,
   SquidClientOptions,
   SquidFundingPlan,
-  SquidQuote,
+  SquidPriceQuote,
 } from "./types.js"
 
 const MAX_QUOTES_PER_LEG = 4
@@ -62,7 +62,7 @@ export async function planSquidFunding(
     throw new Error("The source-token cap must be positive")
 
   const seed = 5n * 10n ** BigInt(Math.max(0, source.decimals - 1))
-  const quotes: SquidQuote[] = []
+  const quotes: SquidPriceQuote[] = []
   let remaining = maxSourceAmount
   for (const requirement of input.requirements) {
     if (remaining <= 0n)
@@ -70,9 +70,9 @@ export async function planSquidFunding(
     let sourceAmount = seed < remaining ? seed : remaining
     let downscaled = false
     for (let attempt = 0; attempt < MAX_QUOTES_PER_LEG; attempt += 1) {
-      let quote: SquidQuote
+      let quote: SquidPriceQuote
       try {
-        quote = await quoteSquidRoute(
+        quote = await quoteSquidPrice(
           {
             owner: input.owner,
             source,
@@ -139,9 +139,6 @@ export async function planSquidFunding(
   }
   if (quotes.length !== input.requirements.length)
     throw new Error("Squid quote planning did not complete")
-  const now = Math.floor((options.now ?? Date.now)() / 1000)
-  if (quotes.some((quote) => quote.expiresAt <= now))
-    throw new Error("A planned Squid route expired before planning completed")
   return {
     owner: input.owner,
     source,

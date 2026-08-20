@@ -13,6 +13,7 @@ export type {
   SquidClientOptions,
   SquidExecutionResult,
   SquidFundingPlan,
+  SquidPriceQuote,
   SquidPublicClient,
   SquidQuote,
   SquidQuoteCost,

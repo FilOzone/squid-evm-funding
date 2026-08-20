@@ -11,6 +11,7 @@ import {
   type SquidClientOptions,
   type SquidExecutionResult,
   type SquidFundingPlan,
+  type SquidPriceQuote,
   type SquidPublicClient,
   type SquidQuote,
   type SquidWalletClient,
@@ -32,7 +33,7 @@ function sleep(milliseconds: number) {
 }
 
 function assertQuote(
-  planned: SquidQuote,
+  planned: SquidPriceQuote,
   refreshed: SquidQuote,
   source: SquidFundingPlan["source"],
   target: Address,
@@ -51,9 +52,7 @@ function assertQuote(
     refreshed.destinationAmount < planned.requirement.amount ||
     refreshed.id.trim() === "" ||
     !sameAddress(refreshed.target, target) ||
-    (planned.approvalSpender != null &&
-      (refreshed.approvalSpender == null ||
-        !sameAddress(refreshed.approvalSpender, planned.approvalSpender))) ||
+    (!native(source.token) && refreshed.approvalSpender == null) ||
     (refreshed.approvalSpender != null &&
       !sameAddress(refreshed.approvalSpender, spender)) ||
     !/^0x(?:[0-9a-fA-F]{2})+$/.test(refreshed.data) ||
@@ -201,7 +200,7 @@ export async function executeSquidFunding(
   )
     throw new Error("Destination RPC chain does not match the Squid route")
 
-  const refresh = (quote: SquidQuote) =>
+  const refresh = (quote: SquidPriceQuote) =>
     quoteSquidRoute(
       {
         owner: plan.owner,
@@ -290,8 +289,8 @@ export async function executeSquidFunding(
   }
 
   for (let index = 0; index < plan.quotes.length; index += 1) {
-    const planned = plan.quotes[index] as SquidQuote
-    let refreshed = await refresh(planned)
+    const planned = plan.quotes[index] as SquidPriceQuote
+    const refreshed = await refresh(planned)
     assertQuote(
       planned,
       refreshed,
@@ -317,7 +316,7 @@ export async function executeSquidFunding(
         functionName: "allowance",
         args: [plan.owner, input.trustedSpender],
       })
-      if (allowance !== refreshed.sourceAmount) {
+      if (allowance !== planned.sourceAmount) {
         if (allowance > 0n)
           await send(
             {
@@ -337,20 +336,11 @@ export async function executeSquidFunding(
             data: encodeFunctionData({
               abi: erc20Abi,
               functionName: "approve",
-              args: [input.trustedSpender, refreshed.sourceAmount],
+              args: [input.trustedSpender, planned.sourceAmount],
             }),
             value: 0n,
           },
           remainingSource,
-        )
-        refreshed = await refresh(planned)
-        assertQuote(
-          planned,
-          refreshed,
-          plan.source,
-          input.trustedTarget,
-          input.trustedSpender,
-          now(),
         )
         allowance = await dependencies.publicClient.readContract({
           address: plan.source.token,
@@ -358,20 +348,12 @@ export async function executeSquidFunding(
           functionName: "allowance",
           args: [plan.owner, input.trustedSpender],
         })
-        if (allowance !== refreshed.sourceAmount)
+        if (allowance !== planned.sourceAmount)
           throw new Error(
             "Exact source-token allowance is required after approval",
           )
       }
     }
-    assertQuote(
-      planned,
-      refreshed,
-      plan.source,
-      input.trustedTarget,
-      input.trustedSpender,
-      now(),
-    )
     const transactionHash = await send(
       {
         to: refreshed.target,
