@@ -479,17 +479,7 @@ describe("Squid funding planning", () => {
     await expect(plan(transient)).rejects.toThrow("quote failed (503)")
   })
 
-  it("retains a feasible fourth price quote", async () => {
-    const outputs = [1_000_000n, 20n, 9n, 10n]
-    const converges = api({
-      route: (request, call) => route(request, outputs[call - 1] as bigint),
-    })
-    const result = await plan(converges)
-    expect(result.quotes[0]?.destinationAmount).toBe(10n)
-    expect(converges.routeCalls()).toBe(4)
-  })
-
-  it("retains a feasible quote when later price refinement slips below target", async () => {
+  it("adds headroom to an insufficient estimate and stops when one is sufficient", async () => {
     const outputs = [355_177n, 3_999_987n, 4_000_001n, 3_999_999n]
     const fluctuates = api({
       route: (request, call) => route(request, outputs[call - 1] as bigint),
@@ -499,6 +489,26 @@ describe("Squid funding planning", () => {
       maxSourceAmount: "10",
     })
     expect(result.quotes[0]?.destinationAmount).toBe(4_000_001n)
-    expect(fluctuates.routeCalls()).toBe(4)
+    expect(fluctuates.routeCalls()).toBe(3)
+
+    const routeRequests = fluctuates.requests
+      .filter(({ url }) => url.endsWith("/route"))
+      .map(({ init }) => JSON.parse(String(init?.body)) as RouteRequest)
+    const firstSourceAmount = BigInt(routeRequests[0]?.fromAmount ?? 0)
+    const exactSecondAmount =
+      (firstSourceAmount * 4_000_000n + outputs[0] - 1n) / outputs[0]
+    expect(BigInt(routeRequests[1]?.fromAmount ?? 0)).toBeGreaterThan(
+      exactSecondAmount,
+    )
+  })
+
+  it("limits an unavailable estimate to eight price quotes", async () => {
+    const unavailable = api({
+      route: (request) => route(request, 1n),
+    })
+    await expect(
+      plan(unavailable, { maxSourceAmount: "10000000000" }),
+    ).rejects.toThrow("Squid could not estimate a sufficient source amount")
+    expect(unavailable.routeCalls()).toBe(8)
   })
 })
