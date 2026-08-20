@@ -359,7 +359,7 @@ describe("guarded Squid execution", () => {
       expiring.calls.send === 0 ? 0 : 2_000
     await expect(
       executeSquidFunding(input(), expiringDependencies),
-    ).rejects.toThrow("expired route")
+    ).rejects.toThrow("trust checks")
     expect(expiring.calls.send).toBe(1)
   })
 

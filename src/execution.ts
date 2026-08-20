@@ -290,6 +290,15 @@ export async function executeSquidFunding(
 
   for (let index = 0; index < plan.quotes.length; index += 1) {
     const planned = plan.quotes[index] as SquidPriceQuote
+    const refreshed = await refresh(planned)
+    assertQuote(
+      planned,
+      refreshed,
+      plan.source,
+      input.trustedTarget,
+      input.trustedSpender,
+      now(),
+    )
     const remainingSource = plan.quotes
       .slice(index)
       .reduce((total, quote) => total + quote.sourceAmount, 0n)
@@ -345,15 +354,6 @@ export async function executeSquidFunding(
           )
       }
     }
-    const refreshed = await refresh(planned)
-    assertQuote(
-      planned,
-      refreshed,
-      plan.source,
-      input.trustedTarget,
-      input.trustedSpender,
-      now(),
-    )
     const transactionHash = await send(
       {
         to: refreshed.target,
