@@ -422,6 +422,26 @@ describe("guarded Squid execution", () => {
     ).rejects.toThrow("Complete execution fee")
   })
 
+  it("accepts prepared transaction fees when the caller selects automatic fees", async () => {
+    const mocked = clients({ allowance: 100n })
+    const result = await executeSquidFunding(
+      input(plan(), { maxNativeFee: "auto" }),
+      dependencies(mocked),
+    )
+
+    expect(mocked.calls.send).toBe(3)
+    expect(result.nativeFee).toBe(18n)
+  })
+
+  it("rejects an unknown automatic fee policy", async () => {
+    await expect(
+      executeSquidFunding(
+        input(plan(), { maxNativeFee: "automatic" as never }),
+        dependencies(clients()),
+      ),
+    ).rejects.toThrow("Execution limits")
+  })
+
   it("uses complete OP Stack fees and applies the caller's buffer", async () => {
     const noEstimator = clients({ allowance: 10n })
     await expect(

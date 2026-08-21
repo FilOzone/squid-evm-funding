@@ -150,6 +150,10 @@ const result = await executeSquidFunding(
 )
 ```
 
+Interactive wallet UIs may pass `maxNativeFee: "auto"` to accept the complete
+fee prepared by the connected wallet for each transaction. Explicit `bigint`
+caps remain available for unattended or policy-controlled callers.
+
 The package never reads private keys, RPC URLs, or the integrator ID from the
 environment. It fetches Squid's token catalog during planning, so source tokens
 are not limited to a package-maintained token list. The host remains responsible
@@ -169,11 +173,13 @@ Execution fails closed unless:
 - exact ERC-20 allowances, source receipts, Squid success, and destination
   balance arrival are verified.
 
-`maxNativeFee` bounds cumulative fee commitments for approvals and routes. For
-OP Stack chains, use `feeMode: "op-stack"`, provide an `estimateTotalFee`
-extension that includes execution, L1 data, and operator fees, and supply a
-conservative `opStackFeeBuffer`. Execution fails if complete fee accounting is
-unavailable.
+An explicit `maxNativeFee` bigint bounds cumulative fee commitments for
+approvals and routes. The `"auto"` policy instead accepts the complete fee
+prepared immediately before each wallet confirmation; live balance and floor
+checks still run before every broadcast. For OP Stack chains, use
+`feeMode: "op-stack"`, provide an `estimateTotalFee` extension that includes
+execution, L1 data, and operator fees, and supply a conservative
+`opStackFeeBuffer`. Execution fails if complete fee accounting is unavailable.
 
 The executor is stateless. A host that must block a rerun after interruption
 should place one coarse marker around `executeSquidFunding` and require manual
