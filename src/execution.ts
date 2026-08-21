@@ -134,7 +134,7 @@ async function prepare(
 export async function executeSquidFunding(
   input: {
     plan: SquidFundingPlan
-    maxNativeFee: bigint
+    maxNativeFee: bigint | "auto"
     sourceBalanceFloor?: bigint
     nativeBalanceFloor?: bigint
     trustedTarget: Address
@@ -153,10 +153,13 @@ export async function executeSquidFunding(
   },
 ): Promise<SquidExecutionResult> {
   const { plan } = input
+  const explicitMaxNativeFee =
+    typeof input.maxNativeFee === "bigint" ? input.maxNativeFee : null
   if (
     plan.quotes.length === 0 ||
     plan.maxSourceAmount <= 0n ||
-    input.maxNativeFee < 0n ||
+    (explicitMaxNativeFee == null && input.maxNativeFee !== "auto") ||
+    (explicitMaxNativeFee != null && explicitMaxNativeFee < 0n) ||
     (input.sourceBalanceFloor ?? 0n) < 0n ||
     (input.nativeBalanceFloor ?? 0n) < 0n ||
     plan.quotes.some(
@@ -239,7 +242,10 @@ export async function executeSquidFunding(
       input.feeMode,
       input.opStackFeeBuffer,
     )
-    if (totalNativeFee + prepared.fee > input.maxNativeFee)
+    if (
+      explicitMaxNativeFee != null &&
+      totalNativeFee + prepared.fee > explicitMaxNativeFee
+    )
       throw new Error("Execution would exceed the total-native-fee cap")
     const [nativeBalance, sourceBalance] = await Promise.all([
       dependencies.publicClient.getBalance({ address: plan.owner }),
