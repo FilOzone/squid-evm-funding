@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/FilOzone/squid-evm-funding/compare/v0.2.2...v0.3.0) (2026-08-21)
+
+
+### Features
+
+* add automatic execution fee policy ([#34](https://github.com/FilOzone/squid-evm-funding/issues/34)) ([c727cf2](https://github.com/FilOzone/squid-evm-funding/commit/c727cf2602bc47d07541634f7c441a97844ff7d7))
+
 ## [0.2.2](https://github.com/FilOzone/squid-evm-funding/compare/v0.2.1...v0.2.2) (2026-08-20)
 
 
