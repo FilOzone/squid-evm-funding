@@ -19,6 +19,8 @@ import {
 
 type Transaction = { to: Address; data: Hex; value: bigint }
 const MAX_POLL_INTERVAL_MS = 2_147_483_647
+const NATIVE_COST_HEADROOM_BPS = 100n
+const BASIS_POINTS = 10_000n
 
 function sameAddress(a: Address, b: Address) {
   return a.toLowerCase() === b.toLowerCase()
@@ -26,6 +28,43 @@ function sameAddress(a: Address, b: Address) {
 
 function native(token: Address) {
   return sameAddress(token, NATIVE_TOKEN_ADDRESS)
+}
+
+function routeNativeFees(
+  quote: SquidPriceQuote,
+  source: SquidFundingPlan["source"],
+) {
+  return quote.costs.reduce(
+    (total, cost) =>
+      total +
+      (cost.kind === "fee" &&
+      cost.token.chainId === source.chainId &&
+      cost.token.address != null &&
+      native(cost.token.address)
+        ? cost.amount
+        : 0n),
+    0n,
+  )
+}
+
+function routeNativeValue(
+  quote: SquidPriceQuote,
+  source: SquidFundingPlan["source"],
+) {
+  return (
+    (native(source.token) ? quote.sourceAmount : 0n) +
+    routeNativeFees(quote, source)
+  )
+}
+
+function reviewedNativeValueCap(
+  quote: SquidPriceQuote,
+  source: SquidFundingPlan["source"],
+) {
+  const fees = routeNativeFees(quote, source)
+  const headroom =
+    (fees * NATIVE_COST_HEADROOM_BPS + BASIS_POINTS - 1n) / BASIS_POINTS
+  return routeNativeValue(quote, source) + headroom
 }
 
 function sleep(milliseconds: number) {
@@ -58,8 +97,8 @@ function assertQuote(
     !/^0x(?:[0-9a-fA-F]{2})+$/.test(refreshed.data) ||
     !Number.isSafeInteger(refreshed.expiresAt) ||
     refreshed.expiresAt <= now ||
-    (native(source.token) && refreshed.value !== refreshed.sourceAmount) ||
-    (!native(source.token) && refreshed.value !== 0n)
+    refreshed.value !== routeNativeValue(refreshed, source) ||
+    refreshed.value > reviewedNativeValueCap(planned, source)
   )
     throw new Error("Refreshed Squid route failed execution trust checks")
 }
@@ -220,6 +259,7 @@ export async function executeSquidFunding(
   const send = async (
     transaction: Transaction,
     remainingSource: bigint,
+    sourceDebit = 0n,
     validate?: () => void,
   ) => {
     const [latestNonce, pendingNonce] = await Promise.all([
@@ -258,9 +298,15 @@ export async function executeSquidFunding(
         (input.sourceBalanceFloor ?? 0n) > (input.nativeBalanceFloor ?? 0n)
           ? (input.sourceBalanceFloor ?? 0n)
           : (input.nativeBalanceFloor ?? 0n)
-      if (nativeBalance < floor + remainingSource + prepared.fee)
+      if (
+        nativeBalance <
+        floor +
+          (remainingSource - sourceDebit) +
+          transaction.value +
+          prepared.fee
+      )
         throw new Error(
-          "Native balance would not cover the source amount, fee, and floor",
+          "Native balance would not cover the route value, fee, and floor",
         )
     } else {
       if (
@@ -268,7 +314,10 @@ export async function executeSquidFunding(
         sourceBalance < remainingSource + (input.sourceBalanceFloor ?? 0n)
       )
         throw new Error("Source-token balance would cross its required floor")
-      if (nativeBalance < prepared.fee + (input.nativeBalanceFloor ?? 0n))
+      if (
+        nativeBalance <
+        transaction.value + prepared.fee + (input.nativeBalanceFloor ?? 0n)
+      )
         throw new Error("Native balance would not cover the fee and floor")
     }
     if (
@@ -367,6 +416,7 @@ export async function executeSquidFunding(
         value: refreshed.value,
       },
       remainingSource,
+      planned.sourceAmount,
       () =>
         assertQuote(
           planned,

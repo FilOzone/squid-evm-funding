@@ -148,6 +148,10 @@ function costs(
         ? { amountUsd: cost.amountUSD }
         : {}),
       token: {
+        address: address(
+          tokenData.address,
+          `${kind} cost ${index + 1} token address`,
+        ),
         chainId: tokenChainId,
         symbol: text(
           tokenData.symbol,

@@ -77,6 +77,7 @@ function route(
             amount: "1",
             amountUSD: "0.01",
             token: {
+              address: sourceToken,
               chainId: request.fromChain,
               symbol: "USDC",
               decimals: 6,
@@ -213,7 +214,12 @@ describe("Squid funding planning", () => {
         name: "Service fee",
         amount: 1n,
         amountUsd: "0.01",
-        token: { chainId: 1, symbol: "USDC", decimals: 6 },
+        token: {
+          address: sourceToken,
+          chainId: 1,
+          symbol: "USDC",
+          decimals: 6,
+        },
       },
     ])
     expect(

@@ -42,6 +42,7 @@ export interface SquidQuoteCost {
   amount: bigint
   amountUsd?: string
   token: {
+    address?: Address
     chainId: number
     symbol: string
     decimals: number
