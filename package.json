@@ -1,6 +1,6 @@
 {
   "name": "@filecoin-project/squid-evm-funding",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Minimal helpers for acquiring exact EVM token shortfalls through Squid",
   "publishConfig": {
     "access": "public"
