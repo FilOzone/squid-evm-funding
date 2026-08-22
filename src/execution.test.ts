@@ -342,16 +342,6 @@ describe("guarded Squid execution", () => {
         },
       },
       {
-        name: "missing spender",
-        mutate: (route) => {
-          const transaction = route.transactionRequest as Record<
-            string,
-            unknown
-          >
-          delete transaction.approvalSpender
-        },
-      },
-      {
         name: "ERC-20 value",
         mutate: (route) => {
           const transaction = route.transactionRequest as Record<
@@ -498,23 +488,23 @@ describe("guarded Squid execution", () => {
     )
   })
 
-  it("allows 1% native fee movement and rejects anything above it", async () => {
+  it("allows 50% native fee headroom and rejects anything above it", async () => {
     const withinCap = clients({ allowance: 10n, nativeBalance: 20_000n })
     await expect(
       executeSquidFunding(
         input(plan([quote({ costs: [nativeFee(10_000n)] })])),
-        dependencies(withinCap, provider({ nativeFee: 10_100n })),
+        dependencies(withinCap, provider({ nativeFee: 15_000n })),
       ),
     ).resolves.toBeDefined()
     expect(withinCap.calls.sent[0]).toEqual(
-      expect.objectContaining({ value: 10_100n }),
+      expect.objectContaining({ value: 15_000n }),
     )
 
     const mocked = clients({ allowance: 10n })
     await expect(
       executeSquidFunding(
         input(plan([quote({ costs: [nativeFee(10_000n)] })])),
-        dependencies(mocked, provider({ nativeFee: 10_101n })),
+        dependencies(mocked, provider({ nativeFee: 15_001n })),
       ),
     ).rejects.toThrow("trust checks")
     expect(mocked.calls.send).toBe(0)
@@ -813,5 +803,79 @@ describe("guarded Squid execution", () => {
         dependencies(insufficient),
       ),
     ).rejects.toThrow("route value, fee, and floor")
+  })
+
+  describe("assertQuote live-route tolerance", () => {
+    it("accepts an ERC-20 route whose refreshed quote omits approvalSpender", async () => {
+      const mocked = clients({ allowance: 10n })
+      const squid = provider({
+        mutateRoute: (route) => {
+          const transaction = route.transactionRequest as Record<
+            string,
+            unknown
+          >
+          delete transaction.approvalSpender
+        },
+      })
+      await expect(
+        executeSquidFunding(input(), dependencies(mocked, squid)),
+      ).resolves.toBeDefined()
+      expect(squid.routeCalls()).toBe(1)
+    })
+
+    it("still rejects a refreshed approvalSpender that mismatches the trusted spender", async () => {
+      const mocked = clients({ allowance: 10n })
+      const squid = provider({
+        mutateRoute: (route) => {
+          const transaction = route.transactionRequest as Record<
+            string,
+            unknown
+          >
+          transaction.approvalSpender = destinationToken
+        },
+      })
+      await expect(
+        executeSquidFunding(input(), dependencies(mocked, squid)),
+      ).rejects.toThrow("trust checks")
+      expect(mocked.calls.send).toBe(0)
+    })
+
+    it("accepts a refreshed route whose native value drifted up within 50% fee headroom", async () => {
+      const mocked = clients({ allowance: 10n, nativeBalance: 20_000n })
+      await expect(
+        executeSquidFunding(
+          input(plan([quote({ costs: [nativeFee(10_000n)] })])),
+          dependencies(mocked, provider({ nativeFee: 10_500n })),
+        ),
+      ).resolves.toBeDefined()
+      expect(mocked.calls.sent[0]).toEqual(
+        expect.objectContaining({ value: 10_500n }),
+      )
+    })
+
+    it("rejects a refreshed route whose value exceeds the 50% headroom cap", async () => {
+      const mocked = clients({ allowance: 10n })
+      await expect(
+        executeSquidFunding(
+          input(plan([quote({ costs: [nativeFee(10_000n)] })])),
+          dependencies(mocked, provider({ nativeFee: 16_000n })),
+        ),
+      ).rejects.toThrow("trust checks")
+      expect(mocked.calls.send).toBe(0)
+    })
+
+    it("rejects a refreshed route delivering below the reviewed minimum", async () => {
+      const mocked = clients({ allowance: 10n })
+      const squid = provider({
+        mutateRoute: (route) => {
+          const estimate = route.estimate as Record<string, unknown>
+          estimate.toAmountMin = "9"
+        },
+      })
+      await expect(
+        executeSquidFunding(input(), dependencies(mocked, squid)),
+      ).rejects.toThrow("trust checks")
+      expect(mocked.calls.send).toBe(0)
+    })
   })
 })
