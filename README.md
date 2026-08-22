@@ -167,7 +167,8 @@ Execution fails closed unless:
 - RPC and account-bound wallet clients match the source chain and owner;
 - every requirement uses the destination client's chain;
 - refreshed routes preserve source amount and destination identity, remain
-  unexpired, and use caller-trusted target and spender addresses;
+  unexpired, use caller-trusted target and spender addresses, and keep
+  source-chain native route fees within 1% of the reviewed plan;
 - source and native balances preserve the optional caller-selected floors;
 - no pending transaction or nonce change makes the next send ambiguous;
 - exact ERC-20 allowances, source receipts, Squid success, and destination

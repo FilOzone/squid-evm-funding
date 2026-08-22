@@ -33,6 +33,20 @@ function quote(overrides: Partial<SquidPriceQuote> = {}): SquidPriceQuote {
   }
 }
 
+function nativeFee(amount: bigint) {
+  return {
+    kind: "fee" as const,
+    name: "Gas receiver fee",
+    amount,
+    token: {
+      address: NATIVE_TOKEN_ADDRESS,
+      chainId: 1,
+      symbol: "ETH",
+      decimals: 18,
+    },
+  }
+}
+
 function plan(
   quotes: readonly SquidPriceQuote[] = [quote()],
   overrides: Partial<SquidFundingPlan> = {},
@@ -53,6 +67,7 @@ function plan(
 function provider(
   options: {
     mutateRoute?: (route: Record<string, unknown>, call: number) => void
+    nativeFee?: bigint
     statuses?: string[]
   } = {},
 ) {
@@ -79,6 +94,7 @@ function provider(
       quoteOnly: boolean
     }
     routeCalls += 1
+    const routeNativeFee = options.nativeFee ?? 0n
     const route: Record<string, unknown> = {
       quoteId: `fresh-${routeCalls}`,
       params: { ...request },
@@ -91,15 +107,32 @@ function provider(
             toChain: request.toChain,
           },
         ],
-        feeCosts: [],
+        feeCosts:
+          routeNativeFee === 0n
+            ? []
+            : [
+                {
+                  name: "Gas receiver fee",
+                  amount: routeNativeFee.toString(),
+                  token: {
+                    address: NATIVE_TOKEN_ADDRESS,
+                    chainId: request.fromChain,
+                    symbol: "ETH",
+                    decimals: 18,
+                  },
+                },
+              ],
         gasCosts: [],
       },
       transactionRequest: {
         target,
         approvalSpender: spender,
         data: `0x${routeCalls.toString(16).padStart(2, "0")}`,
-        value:
-          request.fromToken === NATIVE_TOKEN_ADDRESS ? request.fromAmount : "0",
+        value: (
+          (request.fromToken === NATIVE_TOKEN_ADDRESS
+            ? BigInt(request.fromAmount)
+            : 0n) + routeNativeFee
+        ).toString(),
         expiry: "2000000000",
       },
     }
@@ -422,6 +455,71 @@ describe("guarded Squid execution", () => {
     ).rejects.toThrow("Complete execution fee")
   })
 
+  it("accepts reviewed source-chain native route fees and reserves their value", async () => {
+    const planned = quote({ costs: [nativeFee(2n)] })
+    const nativePlan = plan([planned], {
+      source: {
+        chainId: 1,
+        token: NATIVE_TOKEN_ADDRESS,
+        symbol: "ETH",
+        decimals: 18,
+      },
+    })
+    const nativeClients = clients({ nativeBalance: 18n })
+    await expect(
+      executeSquidFunding(
+        input(nativePlan),
+        dependencies(nativeClients, provider({ nativeFee: 2n })),
+      ),
+    ).resolves.toBeDefined()
+    expect(nativeClients.calls.sent[0]).toEqual(
+      expect.objectContaining({ value: 12n }),
+    )
+
+    await expect(
+      executeSquidFunding(
+        input(nativePlan),
+        dependencies(
+          clients({ nativeBalance: 17n }),
+          provider({ nativeFee: 2n }),
+        ),
+      ),
+    ).rejects.toThrow("route value, fee, and floor")
+
+    const tokenClients = clients({ allowance: 10n, nativeBalance: 8n })
+    await expect(
+      executeSquidFunding(
+        input(plan([planned])),
+        dependencies(tokenClients, provider({ nativeFee: 2n })),
+      ),
+    ).resolves.toBeDefined()
+    expect(tokenClients.calls.sent[0]).toEqual(
+      expect.objectContaining({ value: 2n }),
+    )
+  })
+
+  it("allows 1% native fee movement and rejects anything above it", async () => {
+    const withinCap = clients({ allowance: 10n, nativeBalance: 20_000n })
+    await expect(
+      executeSquidFunding(
+        input(plan([quote({ costs: [nativeFee(10_000n)] })])),
+        dependencies(withinCap, provider({ nativeFee: 10_100n })),
+      ),
+    ).resolves.toBeDefined()
+    expect(withinCap.calls.sent[0]).toEqual(
+      expect.objectContaining({ value: 10_100n }),
+    )
+
+    const mocked = clients({ allowance: 10n })
+    await expect(
+      executeSquidFunding(
+        input(plan([quote({ costs: [nativeFee(10_000n)] })])),
+        dependencies(mocked, provider({ nativeFee: 10_101n })),
+      ),
+    ).rejects.toThrow("trust checks")
+    expect(mocked.calls.send).toBe(0)
+  })
+
   it("accepts prepared transaction fees when the caller selects automatic fees", async () => {
     const mocked = clients({ allowance: 100n })
     const result = await executeSquidFunding(
@@ -701,6 +799,9 @@ describe("guarded Squid execution", () => {
     )
     expect(result.sourceAmount).toBe(10n)
     expect(mocked.calls.send).toBe(1)
+    expect(mocked.calls.sent[0]).toEqual(
+      expect.objectContaining({ value: 10n }),
+    )
 
     const insufficient = clients({ nativeBalance: 19n })
     await expect(
@@ -711,6 +812,6 @@ describe("guarded Squid execution", () => {
         }),
         dependencies(insufficient),
       ),
-    ).rejects.toThrow("source amount, fee, and floor")
+    ).rejects.toThrow("route value, fee, and floor")
   })
 })
