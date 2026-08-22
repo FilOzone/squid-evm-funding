@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/FilOzone/squid-evm-funding/compare/v0.3.0...v0.3.1) (2026-08-22)
+
+
+### Bug Fixes
+
+* account for Squid route native fees ([#36](https://github.com/FilOzone/squid-evm-funding/issues/36)) ([53127f3](https://github.com/FilOzone/squid-evm-funding/commit/53127f3689c58264c9b8dfec88d3ca37035bc6ca))
+
 ## [0.3.0](https://github.com/FilOzone/squid-evm-funding/compare/v0.2.2...v0.3.0) (2026-08-21)
 
 
