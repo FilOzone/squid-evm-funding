@@ -38,7 +38,9 @@ fresh executable transaction data only after the user initiates execution, then
 checks the route against the target and spender allowed by the host application.
 The lower-level `quoteSquidRoute` and `assertTrustedSquidQuote` exports remain
 available for callers that explicitly request executable routes. The package
-exports `SQUID_ROUTER_ADDRESS` for the router used by this integration.
+accepts an omitted approval spender, but any spender returned by Squid must be
+present in and match the caller's trusted policy. The package exports
+`SQUID_ROUTER_ADDRESS` for the router used by this integration.
 
 ### Browser wallet
 

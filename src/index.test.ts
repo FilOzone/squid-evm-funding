@@ -251,6 +251,32 @@ describe("Squid funding planning", () => {
     expect(request.quoteOnly).toBe(false)
   })
 
+  it("allows an omitted approval spender without trusting a present spender", async () => {
+    const omitted = await executableQuote(
+      api({
+        route: (request) =>
+          route(request, 10n, (value) => {
+            const transaction = (value.route as Record<string, unknown>)
+              .transactionRequest as Record<string, unknown>
+            delete transaction.approvalSpender
+          }),
+      }),
+    )
+    expect(assertTrustedSquidQuote(omitted, { target, spender })).toBe(omitted)
+    expect(assertTrustedSquidQuote(omitted, { target })).toBe(omitted)
+
+    const present = await executableQuote(api({}))
+    expect(() => assertTrustedSquidQuote(present, { target })).toThrow(
+      "trusted target or spender",
+    )
+    expect(() =>
+      assertTrustedSquidQuote(present, {
+        target,
+        spender: destinationToken,
+      }),
+    ).toThrow("trusted target or spender")
+  })
+
   it("fetches only tokens and resolves a symbol, address, or native token", async () => {
     for (const selector of ["USDC", sourceToken, "native"]) {
       const mocked = api({})
