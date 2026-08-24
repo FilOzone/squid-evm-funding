@@ -177,6 +177,7 @@ describe("browser package support", () => {
         {
           plan,
           maxNativeFee: 6n,
+          maxTotalNativeRouteFee: 0n,
           trustedTarget: target,
           trustedSpender: spender,
           feeMode: "standard",

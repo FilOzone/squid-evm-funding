@@ -7,7 +7,9 @@
 // fails on live quote drift. No transactions, no keys.
 //
 // Usage: SQUID_INTEGRATOR_ID=... node scripts/repro-trust-check.mjs
+// Optional: MAX_TOTAL_NATIVE_ROUTE_FEE=<wei> sets the caller-owned cap.
 import {
+  maximumNativeRouteFee,
   NATIVE_TOKEN_ADDRESS,
   planSquidFunding,
   quoteSquidRoute,
@@ -17,6 +19,13 @@ import {
 const integratorId = process.env.SQUID_INTEGRATOR_ID?.trim()
 if (!integratorId) throw new Error("SQUID_INTEGRATOR_ID env required")
 const options = { integratorId, fetch: globalThis.fetch }
+const maxTotalNativeRouteFeeText =
+  process.env.MAX_TOTAL_NATIVE_ROUTE_FEE?.trim()
+if (
+  maxTotalNativeRouteFeeText != null &&
+  !/^\d+$/.test(maxTotalNativeRouteFeeText)
+)
+  throw new Error("MAX_TOTAL_NATIVE_ROUTE_FEE must be a non-negative integer")
 
 const BASE = 8453
 const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
@@ -25,8 +34,6 @@ const USDFC = "0x80B98d3aa09ffff255c3ba4A241111Ff1262F045"
 const OWNER = "0xffd636C1f7f8Ec9754f608bc2DCcDcf1BE5D666E" // any funded address; read-only
 
 // --- mirror the private helpers assertQuote depends on (src/execution.ts) ---
-const NATIVE_COST_HEADROOM_BPS = 100n
-const BASIS_POINTS = 10_000n
 const sameAddress = (a, b) => a.toLowerCase() === b.toLowerCase()
 const native = (token) => sameAddress(token, NATIVE_TOKEN_ADDRESS)
 const routeNativeFees = (quote, source) =>
@@ -46,9 +53,10 @@ const routeNativeValue = (quote, source) =>
   routeNativeFees(quote, source)
 const reviewedNativeValueCap = (quote, source) => {
   const fees = routeNativeFees(quote, source)
-  const headroom =
-    (fees * NATIVE_COST_HEADROOM_BPS + BASIS_POINTS - 1n) / BASIS_POINTS
-  return routeNativeValue(quote, source) + headroom
+  return (
+    (native(source.token) ? quote.sourceAmount : 0n) +
+    maximumNativeRouteFee(fees)
+  )
 }
 
 // --- plan (quoteOnly), exactly like the explorer's estimate step ---
@@ -73,11 +81,19 @@ const plan = await planSquidFunding(
 )
 const planned = plan.quotes[0]
 const source = plan.source
+// This repro has one route, so nativeRouteFeeSoFar is zero. By default the
+// absolute cap does not constrain more tightly than the 50% reviewed cap.
+const maxTotalNativeRouteFee =
+  maxTotalNativeRouteFeeText == null
+    ? reviewedNativeValueCap(planned, source) -
+      (native(source.token) ? planned.sourceAmount : 0n)
+    : BigInt(maxTotalNativeRouteFeeText)
 console.log("planned:", {
   sourceAmount: planned.sourceAmount,
   destinationAmount: planned.destinationAmount,
   nativeFees: routeNativeFees(planned, source),
   reviewedNativeValueCap: reviewedNativeValueCap(planned, source),
+  maxTotalNativeRouteFee,
   costs: planned.costs.map(
     (c) =>
       `${c.kind}:${c.name}@${c.token.chainId} ${c.amount} ${c.token.symbol}`,
@@ -135,8 +151,6 @@ const clauses = {
     refreshed.destinationAmount < planned.requirement.amount,
   emptyRouteId: refreshed.id.trim() === "",
   targetMismatch: !sameAddress(refreshed.target, target),
-  missingApprovalSpender:
-    !native(source.token) && refreshed.approvalSpender == null,
   spenderMismatch:
     refreshed.approvalSpender != null &&
     !sameAddress(refreshed.approvalSpender, spender),
@@ -147,6 +161,8 @@ const clauses = {
     refreshed.value !== routeNativeValue(refreshed, source),
   valueAboveReviewedCap:
     refreshed.value > reviewedNativeValueCap(planned, source),
+  totalNativeRouteFeeAboveCallerCap:
+    routeNativeFees(refreshed, source) > maxTotalNativeRouteFee,
 }
 console.table(
   Object.entries(clauses).map(([clause, fails]) => ({ clause, fails })),

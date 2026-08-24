@@ -138,6 +138,7 @@ const result = await executeSquidFunding(
   {
     plan,
     maxNativeFee: parseEther("0.005"),
+    maxTotalNativeRouteFee: parseEther("0.001"),
     sourceBalanceFloor: 0n,
     nativeBalanceFloor: parseEther("0.001"),
     trustedTarget: squidRouterAddress,
@@ -167,17 +168,25 @@ Execution fails closed unless:
 - RPC and account-bound wallet clients match the source chain and owner;
 - every requirement uses the destination client's chain;
 - refreshed routes preserve source amount and destination identity, remain
-  unexpired, use caller-trusted target and spender addresses, and keep
-  source-chain native route fees within 1% of the reviewed plan;
+  unexpired, use caller-trusted target and spender addresses, limit each
+  source-chain native route fee to at most 50% above its reviewed amount, and
+  keep cumulative route fees within `maxTotalNativeRouteFee`;
 - source and native balances preserve the optional caller-selected floors;
 - no pending transaction or nonce change makes the next send ambiguous;
 - exact ERC-20 allowances, source receipts, Squid success, and destination
   balance arrival are verified.
 
-An explicit `maxNativeFee` bigint bounds cumulative fee commitments for
-approvals and routes. The `"auto"` policy instead accepts the complete fee
-prepared immediately before each wallet confirmation; live balance and floor
-checks still run before every broadcast. For OP Stack chains, use
+`maxTotalNativeRouteFee` is an explicit bigint cap on cumulative Squid route
+fees paid in the source chain's native currency. For native-token sources, it
+does not include the fixed source amount, which remains bounded by the reviewed
+plan and `maxSourceAmount`. Hosts can calculate each reviewed route's 50%
+execution maximum with `maximumNativeRouteFee` and sum those values for the
+cap they show to the user.
+
+An explicit `maxNativeFee` bigint separately bounds cumulative network-fee
+commitments for approvals and routes. The `"auto"` policy instead accepts the
+complete fee prepared immediately before each wallet confirmation; live balance
+and floor checks still run before every broadcast. For OP Stack chains, use
 `feeMode: "op-stack"`, provide an `estimateTotalFee` extension that includes
 execution, L1 data, and operator fees, and supply a conservative
 `opStackFeeBuffer`. Execution fails if complete fee accounting is unavailable.

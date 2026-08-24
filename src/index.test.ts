@@ -176,6 +176,7 @@ describe("Squid funding planning", () => {
       "assertTrustedSquidQuote",
       "executeSquidFunding",
       "fetchSourceTokens",
+      "maximumNativeRouteFee",
       "planSquidFunding",
       "quoteSquidRoute",
       "resolveSourceToken",

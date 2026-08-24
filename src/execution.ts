@@ -25,6 +25,14 @@ const MAX_POLL_INTERVAL_MS = 2_147_483_647
 const NATIVE_COST_HEADROOM_BPS = 5000n
 const BASIS_POINTS = 10_000n
 
+export function maximumNativeRouteFee(reviewedFee: bigint) {
+  if (reviewedFee < 0n)
+    throw new Error("Reviewed native route fee must be non-negative")
+  const headroom =
+    (reviewedFee * NATIVE_COST_HEADROOM_BPS + BASIS_POINTS - 1n) / BASIS_POINTS
+  return reviewedFee + headroom
+}
+
 function sameAddress(a: Address, b: Address) {
   return a.toLowerCase() === b.toLowerCase()
 }
@@ -65,9 +73,10 @@ function reviewedNativeValueCap(
   source: SquidFundingPlan["source"],
 ) {
   const fees = routeNativeFees(quote, source)
-  const headroom =
-    (fees * NATIVE_COST_HEADROOM_BPS + BASIS_POINTS - 1n) / BASIS_POINTS
-  return routeNativeValue(quote, source) + headroom
+  return (
+    (native(source.token) ? quote.sourceAmount : 0n) +
+    maximumNativeRouteFee(fees)
+  )
 }
 
 function sleep(milliseconds: number) {
@@ -80,6 +89,8 @@ function assertQuote(
   source: SquidFundingPlan["source"],
   target: Address,
   spender: Address,
+  nativeRouteFeeSoFar: bigint,
+  maxTotalNativeRouteFee: bigint,
   now: number,
 ) {
   if (
@@ -100,7 +111,9 @@ function assertQuote(
     !Number.isSafeInteger(refreshed.expiresAt) ||
     refreshed.expiresAt <= now ||
     refreshed.value !== routeNativeValue(refreshed, source) ||
-    refreshed.value > reviewedNativeValueCap(planned, source)
+    refreshed.value > reviewedNativeValueCap(planned, source) ||
+    nativeRouteFeeSoFar + routeNativeFees(refreshed, source) >
+      maxTotalNativeRouteFee
   )
     throw new Error("Refreshed Squid route failed execution trust checks")
 }
@@ -176,6 +189,7 @@ export async function executeSquidFunding(
   input: {
     plan: SquidFundingPlan
     maxNativeFee: bigint | "auto"
+    maxTotalNativeRouteFee: bigint
     sourceBalanceFloor?: bigint
     nativeBalanceFloor?: bigint
     trustedTarget: Address
@@ -201,6 +215,8 @@ export async function executeSquidFunding(
     plan.maxSourceAmount <= 0n ||
     (explicitMaxNativeFee == null && input.maxNativeFee !== "auto") ||
     (explicitMaxNativeFee != null && explicitMaxNativeFee < 0n) ||
+    typeof input.maxTotalNativeRouteFee !== "bigint" ||
+    input.maxTotalNativeRouteFee < 0n ||
     (input.sourceBalanceFloor ?? 0n) < 0n ||
     (input.nativeBalanceFloor ?? 0n) < 0n ||
     plan.quotes.some(
@@ -231,6 +247,12 @@ export async function executeSquidFunding(
   )
   if (sourceAmount > plan.maxSourceAmount)
     throw new Error("Execution would exceed the source-token cap")
+  const plannedNativeRouteFee = plan.quotes.reduce(
+    (total, quote) => total + routeNativeFees(quote, plan.source),
+    0n,
+  )
+  if (plannedNativeRouteFee > input.maxTotalNativeRouteFee)
+    throw new Error("Execution would exceed the total-native-route-fee cap")
   if ((await dependencies.publicClient.getChainId()) !== plan.source.chainId)
     throw new Error("Source RPC chain does not match the Squid source chain")
   if ((await dependencies.walletClient.getChainId()) !== plan.source.chainId)
@@ -257,6 +279,7 @@ export async function executeSquidFunding(
     )
   const now = () => Math.floor((dependencies.squid.now ?? Date.now)() / 1000)
   let totalNativeFee = 0n
+  let totalNativeRouteFee = 0n
   const routes: Array<{ requirementId: string; transactionHash: Hash }> = []
   const send = async (
     transaction: Transaction,
@@ -354,6 +377,8 @@ export async function executeSquidFunding(
       plan.source,
       input.trustedTarget,
       input.trustedSpender,
+      totalNativeRouteFee,
+      input.maxTotalNativeRouteFee,
       now(),
     )
     const remainingSource = plan.quotes
@@ -426,9 +451,12 @@ export async function executeSquidFunding(
           plan.source,
           input.trustedTarget,
           input.trustedSpender,
+          totalNativeRouteFee,
+          input.maxTotalNativeRouteFee,
           now(),
         ),
     )
+    totalNativeRouteFee += routeNativeFees(refreshed, plan.source)
     let complete = false
     for (let attempt = 0; attempt < input.maxPollAttempts; attempt += 1) {
       // The source transaction is already committed here, so a failed
