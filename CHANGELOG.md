@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/FilOzone/squid-evm-funding/compare/v0.3.1...v0.3.2) (2026-08-24)
+
+
+### Bug Fixes
+
+* tolerate live-route quote shape in trust checks ([#38](https://github.com/FilOzone/squid-evm-funding/issues/38)) ([4d05634](https://github.com/FilOzone/squid-evm-funding/commit/4d0563472308bc4441d81ca0ef8739e9091605a9))
+
 ## [0.3.1](https://github.com/FilOzone/squid-evm-funding/compare/v0.3.0...v0.3.1) (2026-08-22)
 
 
