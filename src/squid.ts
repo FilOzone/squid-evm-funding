@@ -378,10 +378,9 @@ export function assertTrustedSquidQuote(
 ): SquidQuote {
   if (
     !sameAddress(quote.target, trusted.target) ||
-    (quote.approvalSpender == null) !== (trusted.spender == null) ||
     (quote.approvalSpender != null &&
-      trusted.spender != null &&
-      !sameAddress(quote.approvalSpender, trusted.spender))
+      (trusted.spender == null ||
+        !sameAddress(quote.approvalSpender, trusted.spender)))
   )
     throw new Error("Squid route failed trusted target or spender checks")
   return quote

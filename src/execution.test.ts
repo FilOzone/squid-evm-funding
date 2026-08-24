@@ -2,6 +2,7 @@ import { type Account, decodeFunctionData, erc20Abi } from "viem"
 import { describe, expect, it } from "vitest"
 import {
   executeSquidFunding,
+  maximumNativeRouteFee,
   NATIVE_TOKEN_ADDRESS,
   type SquidFundingPlan,
   type SquidPriceQuote,
@@ -248,6 +249,7 @@ function input(
   return {
     plan: fundingPlan,
     maxNativeFee: 20n,
+    maxTotalNativeRouteFee: 20_000n,
     trustedTarget: target,
     trustedSpender: spender,
     feeMode: "standard" as const,
@@ -272,6 +274,13 @@ function dependencies(mocked: ReturnType<typeof clients>, squid = provider()) {
 }
 
 describe("guarded Squid execution", () => {
+  it("calculates the reviewed native route-fee maximum", () => {
+    expect(maximumNativeRouteFee(0n)).toBe(0n)
+    expect(maximumNativeRouteFee(1n)).toBe(2n)
+    expect(maximumNativeRouteFee(10_000n)).toBe(15_000n)
+    expect(() => maximumNativeRouteFee(-1n)).toThrow("non-negative")
+  })
+
   it("sets an exact allowance, uses RPC-prepared requests, and returns hashes", async () => {
     const mocked = clients()
     const squid = provider()
@@ -339,16 +348,6 @@ describe("guarded Squid execution", () => {
             unknown
           >
           transaction.approvalSpender = destinationToken
-        },
-      },
-      {
-        name: "missing spender",
-        mutate: (route) => {
-          const transaction = route.transactionRequest as Record<
-            string,
-            unknown
-          >
-          delete transaction.approvalSpender
         },
       },
       {
@@ -455,7 +454,7 @@ describe("guarded Squid execution", () => {
     ).rejects.toThrow("Complete execution fee")
   })
 
-  it("accepts reviewed source-chain native route fees and reserves their value", async () => {
+  it("accepts reviewed source-chain native route fees and excludes source amount from their cap", async () => {
     const planned = quote({ costs: [nativeFee(2n)] })
     const nativePlan = plan([planned], {
       source: {
@@ -468,7 +467,7 @@ describe("guarded Squid execution", () => {
     const nativeClients = clients({ nativeBalance: 18n })
     await expect(
       executeSquidFunding(
-        input(nativePlan),
+        input(nativePlan, { maxTotalNativeRouteFee: 2n }),
         dependencies(nativeClients, provider({ nativeFee: 2n })),
       ),
     ).resolves.toBeDefined()
@@ -498,26 +497,79 @@ describe("guarded Squid execution", () => {
     )
   })
 
-  it("allows 1% native fee movement and rejects anything above it", async () => {
+  it("allows 50% native fee headroom and rejects anything above it", async () => {
     const withinCap = clients({ allowance: 10n, nativeBalance: 20_000n })
     await expect(
       executeSquidFunding(
         input(plan([quote({ costs: [nativeFee(10_000n)] })])),
-        dependencies(withinCap, provider({ nativeFee: 10_100n })),
+        dependencies(withinCap, provider({ nativeFee: 15_000n })),
       ),
     ).resolves.toBeDefined()
     expect(withinCap.calls.sent[0]).toEqual(
-      expect.objectContaining({ value: 10_100n }),
+      expect.objectContaining({ value: 15_000n }),
     )
 
     const mocked = clients({ allowance: 10n })
     await expect(
       executeSquidFunding(
         input(plan([quote({ costs: [nativeFee(10_000n)] })])),
-        dependencies(mocked, provider({ nativeFee: 10_101n })),
+        dependencies(mocked, provider({ nativeFee: 15_001n })),
       ),
     ).rejects.toThrow("trust checks")
     expect(mocked.calls.send).toBe(0)
+  })
+
+  it("enforces the caller's cumulative native route-fee cap", async () => {
+    const requirement = quote().requirement
+    const fundingPlan = plan([
+      quote({
+        requirement: { ...requirement, id: "first" },
+        costs: [nativeFee(10n)],
+      }),
+      quote({
+        requirement: { ...requirement, id: "second" },
+        costs: [nativeFee(10n)],
+      }),
+    ])
+    const mocked = clients({ allowance: 10n, nativeBalance: 40n })
+
+    await expect(
+      executeSquidFunding(
+        input(fundingPlan, { maxTotalNativeRouteFee: 20n }),
+        dependencies(mocked, provider({ nativeFee: 15n })),
+      ),
+    ).rejects.toThrow("trust checks")
+    expect(mocked.calls.send).toBe(1)
+  })
+
+  it("rejects a reviewed plan that already exceeds the route-fee cap", async () => {
+    const mocked = clients({ allowance: 10n })
+
+    await expect(
+      executeSquidFunding(
+        input(plan([quote({ costs: [nativeFee(11n)] })]), {
+          maxTotalNativeRouteFee: 10n,
+        }),
+        dependencies(mocked),
+      ),
+    ).rejects.toThrow("total-native-route-fee cap")
+    expect(mocked.calls.send).toBe(0)
+  })
+
+  it("accepts the exact cumulative route-fee cap", async () => {
+    const mocked = clients({ allowance: 10n, nativeBalance: 21n })
+
+    await expect(
+      executeSquidFunding(
+        input(plan([quote({ costs: [nativeFee(10n)] })]), {
+          maxTotalNativeRouteFee: 15n,
+        }),
+        dependencies(mocked, provider({ nativeFee: 15n })),
+      ),
+    ).resolves.toBeDefined()
+    expect(mocked.calls.sent[0]).toEqual(
+      expect.objectContaining({ value: 15n }),
+    )
   })
 
   it("accepts prepared transaction fees when the caller selects automatic fees", async () => {
@@ -813,5 +865,79 @@ describe("guarded Squid execution", () => {
         dependencies(insufficient),
       ),
     ).rejects.toThrow("route value, fee, and floor")
+  })
+
+  describe("assertQuote live-route tolerance", () => {
+    it("accepts an ERC-20 route whose refreshed quote omits approvalSpender", async () => {
+      const mocked = clients({ allowance: 10n })
+      const squid = provider({
+        mutateRoute: (route) => {
+          const transaction = route.transactionRequest as Record<
+            string,
+            unknown
+          >
+          delete transaction.approvalSpender
+        },
+      })
+      await expect(
+        executeSquidFunding(input(), dependencies(mocked, squid)),
+      ).resolves.toBeDefined()
+      expect(squid.routeCalls()).toBe(1)
+    })
+
+    it("still rejects a refreshed approvalSpender that mismatches the trusted spender", async () => {
+      const mocked = clients({ allowance: 10n })
+      const squid = provider({
+        mutateRoute: (route) => {
+          const transaction = route.transactionRequest as Record<
+            string,
+            unknown
+          >
+          transaction.approvalSpender = destinationToken
+        },
+      })
+      await expect(
+        executeSquidFunding(input(), dependencies(mocked, squid)),
+      ).rejects.toThrow("trust checks")
+      expect(mocked.calls.send).toBe(0)
+    })
+
+    it("accepts a refreshed route whose native value drifted up within 50% fee headroom", async () => {
+      const mocked = clients({ allowance: 10n, nativeBalance: 20_000n })
+      await expect(
+        executeSquidFunding(
+          input(plan([quote({ costs: [nativeFee(10_000n)] })])),
+          dependencies(mocked, provider({ nativeFee: 10_500n })),
+        ),
+      ).resolves.toBeDefined()
+      expect(mocked.calls.sent[0]).toEqual(
+        expect.objectContaining({ value: 10_500n }),
+      )
+    })
+
+    it("rejects a refreshed route whose value exceeds the 50% headroom cap", async () => {
+      const mocked = clients({ allowance: 10n })
+      await expect(
+        executeSquidFunding(
+          input(plan([quote({ costs: [nativeFee(10_000n)] })])),
+          dependencies(mocked, provider({ nativeFee: 16_000n })),
+        ),
+      ).rejects.toThrow("trust checks")
+      expect(mocked.calls.send).toBe(0)
+    })
+
+    it("rejects a refreshed route delivering below the reviewed minimum", async () => {
+      const mocked = clients({ allowance: 10n })
+      const squid = provider({
+        mutateRoute: (route) => {
+          const estimate = route.estimate as Record<string, unknown>
+          estimate.toAmountMin = "9"
+        },
+      })
+      await expect(
+        executeSquidFunding(input(), dependencies(mocked, squid)),
+      ).rejects.toThrow("trust checks")
+      expect(mocked.calls.send).toBe(0)
+    })
   })
 })
