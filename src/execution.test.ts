@@ -156,6 +156,7 @@ function clients(
     nonceDrift?: boolean
     confirmedNonceLagReads?: number
     allowanceLagReads?: number
+    consumeAllowanceOnRoute?: boolean
     walletDrift?: boolean
     reverted?: boolean
   } = {},
@@ -171,11 +172,13 @@ function clients(
   let pendingReads = 0
   let confirmedNonceLagReads = 0
   let allowanceLagReads = 0
+  let staleAllowance: bigint | undefined
   let walletChainReads = 0
   const source = {
     getChainId: async () => 1,
     getBalance: async () => options.nativeBalance ?? 1_000n,
     getTransactionCount: async (request: { blockTag: string }) => {
+      staleAllowance = undefined
       if (request.blockTag === "pending") pendingReads += 1
       if (options.pending && request.blockTag === "pending") return 8
       if (
@@ -210,6 +213,7 @@ function clients(
         allowanceLagReads += 1
         return 0n
       }
+      if (staleAllowance != null) return staleAllowance
       return allowance
     },
     waitForTransactionReceipt: async () => ({
@@ -254,6 +258,9 @@ function clients(
           data: request.data as `0x${string}`,
         })
         if (decoded.functionName === "approve") allowance = decoded.args[1]
+      } else if (request.to === target && options.consumeAllowanceOnRoute) {
+        staleAllowance = allowance
+        allowance = 0n
       }
       return `0x${calls.send.toString().padStart(64, "a")}`
     },
@@ -362,6 +369,29 @@ describe("guarded Squid execution", () => {
     ])
     expect(waits).toEqual([500, 500])
     expect(waitsAtRoute).toBe(2)
+  })
+
+  it("refreshes nonce state before trusting allowance for a later route", async () => {
+    const requirement = quote().requirement
+    const fundingPlan = plan([
+      quote({ requirement: { ...requirement, id: "first" } }),
+      quote({ requirement: { ...requirement, id: "second" } }),
+    ])
+    const mocked = clients({
+      allowance: 10n,
+      consumeAllowanceOnRoute: true,
+      destinationBalances: [0n, 10n, 10n, 20n],
+    })
+    const squid = provider()
+
+    await executeSquidFunding(input(fundingPlan), dependencies(mocked, squid))
+
+    expect(mocked.calls.sent.map((request) => request.to)).toEqual([
+      target,
+      sourceToken,
+      target,
+    ])
+    expect(squid.routeCalls()).toBe(2)
   })
 
   it("retries a rate-limited executable quote using bounded Retry-After", async () => {

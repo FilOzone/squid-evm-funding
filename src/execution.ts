@@ -475,6 +475,7 @@ export async function executeSquidFunding(
           functionName: "allowance",
           args: [plan.owner, input.trustedSpender],
         })
+      if (minimumNonce != null) await settledNonce()
       const allowance = await retryRpcRead(readAllowance)
       if (allowance !== planned.sourceAmount) {
         if (allowance > 0n)
