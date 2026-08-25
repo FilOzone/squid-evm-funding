@@ -421,6 +421,53 @@ describe("guarded Squid execution", () => {
     expect(mocked.calls.send).toBe(1)
   })
 
+  it("stops retrying executable quotes after the bounded attempt limit", async () => {
+    const mocked = clients({ allowance: 10n })
+    const squid = provider()
+    let routeAttempts = 0
+    squid.fetch = (async (url) => {
+      if (String(url).includes("/route")) routeAttempts += 1
+      return new Response("temporarily unavailable", { status: 503 })
+    }) as typeof globalThis.fetch
+    const waits: number[] = []
+    const configured = dependencies(mocked, squid)
+    configured.sleep = async (milliseconds) => {
+      waits.push(milliseconds)
+    }
+
+    await expect(executeSquidFunding(input(), configured)).rejects.toThrow(
+      "Squid quote failed (503)",
+    )
+
+    expect(routeAttempts).toBe(3)
+    expect(waits).toEqual([500, 1_000])
+    expect(mocked.calls.send).toBe(0)
+  })
+
+  it("does not retry non-transient quote HTTP errors", async () => {
+    for (const status of [400, 404, 422]) {
+      const mocked = clients({ allowance: 10n })
+      const squid = provider()
+      let routeAttempts = 0
+      squid.fetch = (async (url) => {
+        if (String(url).includes("/route")) routeAttempts += 1
+        return new Response("invalid request", { status })
+      }) as typeof globalThis.fetch
+      const waits: number[] = []
+      const configured = dependencies(mocked, squid)
+      configured.sleep = async (milliseconds) => {
+        waits.push(milliseconds)
+      }
+
+      await expect(executeSquidFunding(input(), configured)).rejects.toThrow(
+        `Squid quote failed (${status})`,
+      )
+      expect(routeAttempts).toBe(1)
+      expect(waits).toEqual([])
+      expect(mocked.calls.send).toBe(0)
+    }
+  })
+
   it("resets an overbroad allowance before setting the exact amount", async () => {
     const mocked = clients({ allowance: 100n })
     const squid = provider()
