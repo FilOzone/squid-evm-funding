@@ -166,6 +166,7 @@ function clients(
     totalFee: 0,
     sent: [] as Array<Record<string, unknown>>,
     prepared: [] as Array<Record<string, unknown>>,
+    allowanceBlocks: [] as Array<bigint | undefined>,
   }
   let allowance = options.allowance ?? 0n
   let destinationRead = 0
@@ -178,7 +179,6 @@ function clients(
     getChainId: async () => 1,
     getBalance: async () => options.nativeBalance ?? 1_000n,
     getTransactionCount: async (request: { blockTag: string }) => {
-      staleAllowance = undefined
       if (request.blockTag === "pending") pendingReads += 1
       if (options.pending && request.blockTag === "pending") return 8
       if (
@@ -203,9 +203,13 @@ function clients(
             calls.totalFee += 1
             return options.totalFee as bigint
           },
-    readContract: async (request: { functionName: string }) => {
+    readContract: async (request: {
+      functionName: string
+      blockNumber?: bigint
+    }) => {
       if (request.functionName !== "allowance")
         return options.sourceTokenBalance ?? 1_000n
+      calls.allowanceBlocks.push(request.blockNumber)
       if (
         calls.send > 0 &&
         allowanceLagReads < (options.allowanceLagReads ?? 0)
@@ -213,10 +217,12 @@ function clients(
         allowanceLagReads += 1
         return 0n
       }
-      if (staleAllowance != null) return staleAllowance
+      if (staleAllowance != null && request.blockNumber == null)
+        return staleAllowance
       return allowance
     },
     waitForTransactionReceipt: async () => ({
+      blockNumber: 100n + BigInt(calls.send),
       status: options.reverted ? "reverted" : "success",
     }),
   } as unknown as SquidPublicClient
@@ -371,7 +377,7 @@ describe("guarded Squid execution", () => {
     expect(waitsAtRoute).toBe(2)
   })
 
-  it("refreshes nonce state before trusting allowance for a later route", async () => {
+  it("anchors later-route allowance reads to confirmed blocks", async () => {
     const requirement = quote().requirement
     const fundingPlan = plan([
       quote({ requirement: { ...requirement, id: "first" } }),
@@ -391,6 +397,7 @@ describe("guarded Squid execution", () => {
       sourceToken,
       target,
     ])
+    expect(mocked.calls.allowanceBlocks).toEqual([undefined, 101n, 102n])
     expect(squid.routeCalls()).toBe(2)
   })
 

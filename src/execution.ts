@@ -330,6 +330,7 @@ export async function executeSquidFunding(
   let totalNativeFee = 0n
   let totalNativeRouteFee = 0n
   let minimumNonce: number | undefined
+  let confirmedBlockNumber: bigint | undefined
   const routes: Array<{ requirementId: string; transactionHash: Hash }> = []
   const settledNonce = async () => {
     let observedLatest = -1
@@ -458,6 +459,7 @@ export async function executeSquidFunding(
     })
     if (receipt.status !== "success") throw new Error("Transaction reverted")
     minimumNonce = pendingNonce + 1
+    confirmedBlockNumber = receipt.blockNumber
     return transactionHash
   }
 
@@ -474,6 +476,9 @@ export async function executeSquidFunding(
           abi: erc20Abi,
           functionName: "allowance",
           args: [plan.owner, input.trustedSpender],
+          ...(confirmedBlockNumber == null
+            ? {}
+            : { blockNumber: confirmedBlockNumber }),
         })
       if (minimumNonce != null) await settledNonce()
       const allowance = await retryRpcRead(readAllowance)
