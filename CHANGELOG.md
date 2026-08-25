@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/FilOzone/squid-evm-funding/compare/v0.3.2...v0.3.3) (2026-08-25)
+
+
+### Bug Fixes
+
+* harden executable route preflight ([#40](https://github.com/FilOzone/squid-evm-funding/issues/40)) ([340e47e](https://github.com/FilOzone/squid-evm-funding/commit/340e47e246dc4d5c376c823043a14ee978c8dc6e))
+
 ## [0.3.2](https://github.com/FilOzone/squid-evm-funding/compare/v0.3.1...v0.3.2) (2026-08-24)
 
 
