@@ -154,6 +154,9 @@ function clients(
     failDestinationReads?: number[]
     pending?: boolean
     nonceDrift?: boolean
+    confirmedNonceLagReads?: number
+    allowanceLagReads?: number
+    consumeAllowanceOnRoute?: boolean
     walletDrift?: boolean
     reverted?: boolean
   } = {},
@@ -163,10 +166,14 @@ function clients(
     totalFee: 0,
     sent: [] as Array<Record<string, unknown>>,
     prepared: [] as Array<Record<string, unknown>>,
+    allowanceBlocks: [] as Array<bigint | undefined>,
   }
   let allowance = options.allowance ?? 0n
   let destinationRead = 0
   let pendingReads = 0
+  let confirmedNonceLagReads = 0
+  let allowanceLagReads = 0
+  let staleAllowance: bigint | undefined
   let walletChainReads = 0
   const source = {
     getChainId: async () => 1,
@@ -180,6 +187,13 @@ function clients(
         pendingReads > 1
       )
         return 8
+      if (
+        calls.send > 0 &&
+        confirmedNonceLagReads < (options.confirmedNonceLagReads ?? 0)
+      ) {
+        confirmedNonceLagReads += 1
+        return 7 + calls.send - 1
+      }
       return 7 + calls.send
     },
     estimateTotalFee:
@@ -189,11 +203,26 @@ function clients(
             calls.totalFee += 1
             return options.totalFee as bigint
           },
-    readContract: async (request: { functionName: string }) =>
-      request.functionName === "allowance"
-        ? allowance
-        : (options.sourceTokenBalance ?? 1_000n),
+    readContract: async (request: {
+      functionName: string
+      blockNumber?: bigint
+    }) => {
+      if (request.functionName !== "allowance")
+        return options.sourceTokenBalance ?? 1_000n
+      calls.allowanceBlocks.push(request.blockNumber)
+      if (
+        calls.send > 0 &&
+        allowanceLagReads < (options.allowanceLagReads ?? 0)
+      ) {
+        allowanceLagReads += 1
+        return 0n
+      }
+      if (staleAllowance != null && request.blockNumber == null)
+        return staleAllowance
+      return allowance
+    },
     waitForTransactionReceipt: async () => ({
+      blockNumber: 100n + BigInt(calls.send),
       status: options.reverted ? "reverted" : "success",
     }),
   } as unknown as SquidPublicClient
@@ -235,6 +264,9 @@ function clients(
           data: request.data as `0x${string}`,
         })
         if (decoded.functionName === "approve") allowance = decoded.args[1]
+      } else if (request.to === target && options.consumeAllowanceOnRoute) {
+        staleAllowance = allowance
+        allowance = 0n
       }
       return `0x${calls.send.toString().padStart(64, "a")}`
     },
@@ -284,6 +316,13 @@ describe("guarded Squid execution", () => {
   it("sets an exact allowance, uses RPC-prepared requests, and returns hashes", async () => {
     const mocked = clients()
     const squid = provider()
+    const fetch = squid.fetch
+    const routeSendCounts: number[] = []
+    squid.fetch = (async (url, init) => {
+      if (String(url).includes("/route"))
+        routeSendCounts.push(mocked.calls.send)
+      return fetch(url, init)
+    }) as typeof globalThis.fetch
     const result = await executeSquidFunding(
       input(),
       dependencies(mocked, squid),
@@ -308,6 +347,132 @@ describe("guarded Squid execution", () => {
     )
     expect(mocked.calls.sent[1]?.account).toBe(mocked.wallet.account)
     expect(squid.routeCalls()).toBe(1)
+    expect(routeSendCounts).toEqual([1])
+  })
+
+  it("waits for confirmed nonce and allowance reads before requesting the route", async () => {
+    const mocked = clients({
+      confirmedNonceLagReads: 2,
+      allowanceLagReads: 1,
+    })
+    const waits: number[] = []
+    const squid = provider()
+    const fetch = squid.fetch
+    let waitsAtRoute = -1
+    squid.fetch = (async (url, init) => {
+      if (String(url).includes("/route")) waitsAtRoute = waits.length
+      return fetch(url, init)
+    }) as typeof globalThis.fetch
+    const configured = dependencies(mocked, squid)
+    configured.sleep = async (milliseconds) => {
+      waits.push(milliseconds)
+    }
+
+    await executeSquidFunding(input(), configured)
+
+    expect(mocked.calls.prepared.map((request) => request.nonce)).toEqual([
+      7, 8,
+    ])
+    expect(waits).toEqual([500, 500])
+    expect(waitsAtRoute).toBe(2)
+  })
+
+  it("anchors later-route allowance reads to confirmed blocks", async () => {
+    const requirement = quote().requirement
+    const fundingPlan = plan([
+      quote({ requirement: { ...requirement, id: "first" } }),
+      quote({ requirement: { ...requirement, id: "second" } }),
+    ])
+    const mocked = clients({
+      allowance: 10n,
+      consumeAllowanceOnRoute: true,
+      destinationBalances: [0n, 10n, 10n, 20n],
+    })
+    const squid = provider()
+
+    await executeSquidFunding(input(fundingPlan), dependencies(mocked, squid))
+
+    expect(mocked.calls.sent.map((request) => request.to)).toEqual([
+      target,
+      sourceToken,
+      target,
+    ])
+    expect(mocked.calls.allowanceBlocks).toEqual([undefined, 101n, 102n])
+    expect(squid.routeCalls()).toBe(2)
+  })
+
+  it("retries a rate-limited executable quote using bounded Retry-After", async () => {
+    const mocked = clients({ allowance: 10n })
+    const squid = provider()
+    const fetch = squid.fetch
+    let routeAttempts = 0
+    squid.fetch = (async (url, init) => {
+      if (String(url).includes("/route") && routeAttempts++ === 0)
+        return new Response("rate limited", {
+          status: 429,
+          headers: { "retry-after": "2" },
+        })
+      return fetch(url, init)
+    }) as typeof globalThis.fetch
+    const waits: number[] = []
+    const configured = dependencies(mocked, squid)
+    configured.sleep = async (milliseconds) => {
+      waits.push(milliseconds)
+    }
+
+    await executeSquidFunding(input(), configured)
+
+    expect(routeAttempts).toBe(2)
+    expect(squid.routeCalls()).toBe(1)
+    expect(waits).toEqual([2_000])
+    expect(mocked.calls.send).toBe(1)
+  })
+
+  it("stops retrying executable quotes after the bounded attempt limit", async () => {
+    const mocked = clients({ allowance: 10n })
+    const squid = provider()
+    let routeAttempts = 0
+    squid.fetch = (async (url) => {
+      if (String(url).includes("/route")) routeAttempts += 1
+      return new Response("temporarily unavailable", { status: 503 })
+    }) as typeof globalThis.fetch
+    const waits: number[] = []
+    const configured = dependencies(mocked, squid)
+    configured.sleep = async (milliseconds) => {
+      waits.push(milliseconds)
+    }
+
+    await expect(executeSquidFunding(input(), configured)).rejects.toThrow(
+      "Squid quote failed (503)",
+    )
+
+    expect(routeAttempts).toBe(3)
+    expect(waits).toEqual([500, 1_000])
+    expect(mocked.calls.send).toBe(0)
+  })
+
+  it("does not retry non-transient quote HTTP errors", async () => {
+    for (const status of [400, 404, 422]) {
+      const mocked = clients({ allowance: 10n })
+      const squid = provider()
+      let routeAttempts = 0
+      squid.fetch = (async (url) => {
+        if (String(url).includes("/route")) routeAttempts += 1
+        return new Response("invalid request", { status })
+      }) as typeof globalThis.fetch
+      const waits: number[] = []
+      const configured = dependencies(mocked, squid)
+      configured.sleep = async (milliseconds) => {
+        waits.push(milliseconds)
+      }
+
+      await expect(executeSquidFunding(input(), configured)).rejects.toThrow(
+        `Squid quote failed (${status})`,
+      )
+      expect(routeAttempts).toBe(1)
+      expect(waits).toEqual([])
+      expect(mocked.calls.send).toBe(0)
+    }
   })
 
   it("resets an overbroad allowance before setting the exact amount", async () => {
@@ -387,8 +552,8 @@ describe("guarded Squid execution", () => {
         },
       }),
     )
-    expiringDependencies.squid.now = () =>
-      expiring.calls.send === 0 ? 0 : 2_000
+    let nowReads = 0
+    expiringDependencies.squid.now = () => (nowReads++ < 2 ? 0 : 2_000)
     await expect(
       executeSquidFunding(input(), expiringDependencies),
     ).rejects.toThrow("trust checks")

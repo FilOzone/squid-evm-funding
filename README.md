@@ -34,7 +34,8 @@ The public API supports read-only catalog and quote review plus
 URLs, trusted Squid addresses, fee policy, and integrator ID.
 
 Planning uses Squid's price-only route mode. `executeSquidFunding` requests
-fresh executable transaction data only after the user initiates execution, then
+fresh executable transaction data only after the user initiates execution and
+any required ERC-20 approvals have confirmed, then
 checks the route against the target and spender allowed by the host application.
 The lower-level `quoteSquidRoute` and `assertTrustedSquidQuote` exports remain
 available for callers that explicitly request executable routes. The package

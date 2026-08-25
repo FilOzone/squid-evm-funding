@@ -5,7 +5,11 @@ import {
   type Hash,
   type Hex,
 } from "viem"
-import { fetchSquidStatus, quoteSquidRoute } from "./squid.js"
+import {
+  fetchSquidStatus,
+  quoteSquidRoute,
+  SquidQuoteRequestError,
+} from "./squid.js"
 import {
   NATIVE_TOKEN_ADDRESS,
   type SquidClientOptions,
@@ -24,6 +28,9 @@ const MAX_POLL_INTERVAL_MS = 2_147_483_647
 // removes the intermittent abort without meaningfully raising user cost.
 const NATIVE_COST_HEADROOM_BPS = 5000n
 const BASIS_POINTS = 10_000n
+const PREFLIGHT_MAX_ATTEMPTS = 3
+const PREFLIGHT_RETRY_DELAY_MS = 500
+const MAX_RETRY_AFTER_MS = 5_000
 
 export function maximumNativeRouteFee(reviewedFee: bigint) {
   if (reviewedFee < 0n)
@@ -81,6 +88,40 @@ function reviewedNativeValueCap(
 
 function sleep(milliseconds: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds))
+}
+
+async function retryPreflight<T>(
+  operation: () => Promise<T>,
+  shouldRetry: (error: unknown) => boolean,
+  wait: (milliseconds: number) => Promise<void>,
+): Promise<T> {
+  for (let attempt = 0; attempt < PREFLIGHT_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await operation()
+    } catch (error) {
+      if (attempt + 1 === PREFLIGHT_MAX_ATTEMPTS || !shouldRetry(error))
+        throw error
+      const requestedDelay =
+        error instanceof SquidQuoteRequestError ? error.retryAfterMs : undefined
+      await wait(
+        requestedDelay == null
+          ? PREFLIGHT_RETRY_DELAY_MS * (attempt + 1)
+          : Math.min(requestedDelay, MAX_RETRY_AFTER_MS),
+      )
+    }
+  }
+  throw new Error("Preflight retry limit reached")
+}
+
+function retryableSquidQuoteError(error: unknown) {
+  return (
+    error instanceof TypeError ||
+    (error instanceof SquidQuoteRequestError &&
+      (error.status === 408 ||
+        error.status === 425 ||
+        error.status === 429 ||
+        error.status >= 500))
+  )
 }
 
 function assertQuote(
@@ -266,39 +307,97 @@ export async function executeSquidFunding(
   )
     throw new Error("Destination RPC chain does not match the Squid route")
 
+  const wait = dependencies.sleep ?? sleep
   const refresh = (quote: SquidPriceQuote) =>
-    quoteSquidRoute(
-      {
-        owner: plan.owner,
-        source: plan.source,
-        requirement: quote.requirement,
-        sourceAmount: quote.sourceAmount,
-        slippage: plan.slippage,
-      },
-      dependencies.squid,
+    retryPreflight(
+      () =>
+        quoteSquidRoute(
+          {
+            owner: plan.owner,
+            source: plan.source,
+            requirement: quote.requirement,
+            sourceAmount: quote.sourceAmount,
+            slippage: plan.slippage,
+          },
+          dependencies.squid,
+        ),
+      retryableSquidQuoteError,
+      wait,
     )
+  const retryRpcRead = <T>(operation: () => Promise<T>) =>
+    retryPreflight(operation, () => true, wait)
   const now = () => Math.floor((dependencies.squid.now ?? Date.now)() / 1000)
   let totalNativeFee = 0n
   let totalNativeRouteFee = 0n
+  let minimumNonce: number | undefined
+  let confirmedBlockNumber: bigint | undefined
   const routes: Array<{ requirementId: string; transactionHash: Hash }> = []
+  const settledNonce = async () => {
+    let observedLatest = -1
+    let observedPending = -1
+    for (let attempt = 0; attempt < PREFLIGHT_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        const nonceCounts = await Promise.all([
+          dependencies.publicClient.getTransactionCount({
+            address: plan.owner,
+            blockTag: "latest",
+          }),
+          dependencies.publicClient.getTransactionCount({
+            address: plan.owner,
+            blockTag: "pending",
+          }),
+        ])
+        observedLatest = nonceCounts[0]
+        observedPending = nonceCounts[1]
+        if (
+          observedLatest === observedPending &&
+          (minimumNonce == null || observedPending >= minimumNonce)
+        )
+          return observedPending
+      } catch (error) {
+        if (attempt + 1 === PREFLIGHT_MAX_ATTEMPTS) throw error
+      }
+      if (attempt + 1 < PREFLIGHT_MAX_ATTEMPTS)
+        await wait(PREFLIGHT_RETRY_DELAY_MS * (attempt + 1))
+    }
+    if (
+      minimumNonce != null &&
+      observedLatest < minimumNonce &&
+      observedPending < minimumNonce
+    )
+      throw new Error("Source RPC nonce did not catch up after confirmation")
+    throw new Error("Source account has pending transactions")
+  }
+  const confirmPendingNonce = async (expected: number) => {
+    for (let attempt = 0; attempt < PREFLIGHT_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        const pending = await dependencies.publicClient.getTransactionCount({
+          address: plan.owner,
+          blockTag: "pending",
+        })
+        if (pending === expected) return
+        if (pending > expected)
+          throw new Error("Pending nonce changed before broadcast")
+      } catch (error) {
+        if (
+          attempt + 1 === PREFLIGHT_MAX_ATTEMPTS ||
+          (error instanceof Error &&
+            error.message === "Pending nonce changed before broadcast")
+        )
+          throw error
+      }
+      if (attempt + 1 < PREFLIGHT_MAX_ATTEMPTS)
+        await wait(PREFLIGHT_RETRY_DELAY_MS * (attempt + 1))
+    }
+    throw new Error("Pending nonce did not catch up before broadcast")
+  }
   const send = async (
     transaction: Transaction,
     remainingSource: bigint,
     sourceDebit = 0n,
     validate?: () => void,
   ) => {
-    const [latestNonce, pendingNonce] = await Promise.all([
-      dependencies.publicClient.getTransactionCount({
-        address: plan.owner,
-        blockTag: "latest",
-      }),
-      dependencies.publicClient.getTransactionCount({
-        address: plan.owner,
-        blockTag: "pending",
-      }),
-    ])
-    if (latestNonce !== pendingNonce)
-      throw new Error("Source account has pending transactions")
+    const pendingNonce = await settledNonce()
     const prepared = await prepare(
       dependencies.publicClient,
       dependencies.walletClient,
@@ -345,13 +444,7 @@ export async function executeSquidFunding(
       )
         throw new Error("Native balance would not cover the fee and floor")
     }
-    if (
-      (await dependencies.publicClient.getTransactionCount({
-        address: plan.owner,
-        blockTag: "pending",
-      })) !== pendingNonce
-    )
-      throw new Error("Pending nonce changed before broadcast")
+    await confirmPendingNonce(pendingNonce)
     if ((await dependencies.walletClient.getChainId()) !== plan.source.chainId)
       throw new Error("Wallet chain does not match the Squid source chain")
     validate?.()
@@ -365,39 +458,30 @@ export async function executeSquidFunding(
       hash: transactionHash,
     })
     if (receipt.status !== "success") throw new Error("Transaction reverted")
+    minimumNonce = pendingNonce + 1
+    confirmedBlockNumber = receipt.blockNumber
     return transactionHash
   }
 
   for (let index = 0; index < plan.quotes.length; index += 1) {
     const planned = plan.quotes[index] as SquidPriceQuote
-    const refreshed = await refresh(planned)
-    assertQuote(
-      planned,
-      refreshed,
-      plan.source,
-      input.trustedTarget,
-      input.trustedSpender,
-      totalNativeRouteFee,
-      input.maxTotalNativeRouteFee,
-      now(),
-    )
     const remainingSource = plan.quotes
       .slice(index)
       .reduce((total, quote) => total + quote.sourceAmount, 0n)
-    const before =
-      (await balance(
-        dependencies.destinationClient,
-        planned.requirement.token,
-        planned.requirement.recipient,
-      )) + planned.requirement.amount
 
     if (!native(plan.source.token)) {
-      let allowance = await dependencies.publicClient.readContract({
-        address: plan.source.token,
-        abi: erc20Abi,
-        functionName: "allowance",
-        args: [plan.owner, input.trustedSpender],
-      })
+      const readAllowance = () =>
+        dependencies.publicClient.readContract({
+          address: plan.source.token,
+          abi: erc20Abi,
+          functionName: "allowance",
+          args: [plan.owner, input.trustedSpender],
+          ...(confirmedBlockNumber == null
+            ? {}
+            : { blockNumber: confirmedBlockNumber }),
+        })
+      if (minimumNonce != null) await settledNonce()
+      const allowance = await retryRpcRead(readAllowance)
       if (allowance !== planned.sourceAmount) {
         if (allowance > 0n)
           await send(
@@ -424,18 +508,38 @@ export async function executeSquidFunding(
           },
           remainingSource,
         )
-        allowance = await dependencies.publicClient.readContract({
-          address: plan.source.token,
-          abi: erc20Abi,
-          functionName: "allowance",
-          args: [plan.owner, input.trustedSpender],
-        })
-        if (allowance !== planned.sourceAmount)
-          throw new Error(
-            "Exact source-token allowance is required after approval",
-          )
+        await settledNonce()
+        await retryPreflight(
+          async () => {
+            if ((await readAllowance()) !== planned.sourceAmount)
+              throw new Error(
+                "Exact source-token allowance is required after approval",
+              )
+          },
+          () => true,
+          wait,
+        )
       }
     }
+    const before =
+      (await retryRpcRead(() =>
+        balance(
+          dependencies.destinationClient,
+          planned.requirement.token,
+          planned.requirement.recipient,
+        ),
+      )) + planned.requirement.amount
+    const refreshed = await refresh(planned)
+    assertQuote(
+      planned,
+      refreshed,
+      plan.source,
+      input.trustedTarget,
+      input.trustedSpender,
+      totalNativeRouteFee,
+      input.maxTotalNativeRouteFee,
+      now(),
+    )
     const transactionHash = await send(
       {
         to: refreshed.target,
@@ -489,8 +593,7 @@ export async function executeSquidFunding(
         complete = true
         break
       }
-      if (attempt + 1 < input.maxPollAttempts)
-        await (dependencies.sleep ?? sleep)(input.pollIntervalMs)
+      if (attempt + 1 < input.maxPollAttempts) await wait(input.pollIntervalMs)
     }
     if (!complete)
       throw new Error("Squid route did not complete within the poll limit")
