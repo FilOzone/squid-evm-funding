@@ -34,6 +34,24 @@ type RouteWire = {
 
 export class SquidMinimumAmountError extends Error {}
 
+export class SquidQuoteRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly retryAfterMs?: number,
+  ) {
+    super(message)
+  }
+}
+
+function retryAfterMs(response: Response, now: () => number) {
+  const value = response.headers.get("retry-after")?.trim()
+  if (value == null || value === "") return undefined
+  if (/^\d+$/.test(value)) return Number(value) * 1_000
+  const date = Date.parse(value)
+  return Number.isFinite(date) ? Math.max(0, date - now()) : undefined
+}
+
 function client(options: SquidClientOptions) {
   if (options.integratorId.trim() === "")
     throw new Error("Squid integrator ID is required")
@@ -271,8 +289,10 @@ async function requestSquidQuote(
       isMinimumMessage(message)
     )
       throw new SquidMinimumAmountError(message)
-    throw new Error(
+    throw new SquidQuoteRequestError(
       `Squid quote failed (${response.status})${message == null ? "" : `: ${message}`}`,
+      response.status,
+      retryAfterMs(response, options.now ?? Date.now),
     )
   }
 

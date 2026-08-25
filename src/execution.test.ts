@@ -154,6 +154,8 @@ function clients(
     failDestinationReads?: number[]
     pending?: boolean
     nonceDrift?: boolean
+    confirmedNonceLagReads?: number
+    allowanceLagReads?: number
     walletDrift?: boolean
     reverted?: boolean
   } = {},
@@ -167,6 +169,8 @@ function clients(
   let allowance = options.allowance ?? 0n
   let destinationRead = 0
   let pendingReads = 0
+  let confirmedNonceLagReads = 0
+  let allowanceLagReads = 0
   let walletChainReads = 0
   const source = {
     getChainId: async () => 1,
@@ -180,6 +184,13 @@ function clients(
         pendingReads > 1
       )
         return 8
+      if (
+        calls.send > 0 &&
+        confirmedNonceLagReads < (options.confirmedNonceLagReads ?? 0)
+      ) {
+        confirmedNonceLagReads += 1
+        return 7 + calls.send - 1
+      }
       return 7 + calls.send
     },
     estimateTotalFee:
@@ -189,10 +200,18 @@ function clients(
             calls.totalFee += 1
             return options.totalFee as bigint
           },
-    readContract: async (request: { functionName: string }) =>
-      request.functionName === "allowance"
-        ? allowance
-        : (options.sourceTokenBalance ?? 1_000n),
+    readContract: async (request: { functionName: string }) => {
+      if (request.functionName !== "allowance")
+        return options.sourceTokenBalance ?? 1_000n
+      if (
+        calls.send > 0 &&
+        allowanceLagReads < (options.allowanceLagReads ?? 0)
+      ) {
+        allowanceLagReads += 1
+        return 0n
+      }
+      return allowance
+    },
     waitForTransactionReceipt: async () => ({
       status: options.reverted ? "reverted" : "success",
     }),
@@ -284,6 +303,13 @@ describe("guarded Squid execution", () => {
   it("sets an exact allowance, uses RPC-prepared requests, and returns hashes", async () => {
     const mocked = clients()
     const squid = provider()
+    const fetch = squid.fetch
+    const routeSendCounts: number[] = []
+    squid.fetch = (async (url, init) => {
+      if (String(url).includes("/route"))
+        routeSendCounts.push(mocked.calls.send)
+      return fetch(url, init)
+    }) as typeof globalThis.fetch
     const result = await executeSquidFunding(
       input(),
       dependencies(mocked, squid),
@@ -308,6 +334,61 @@ describe("guarded Squid execution", () => {
     )
     expect(mocked.calls.sent[1]?.account).toBe(mocked.wallet.account)
     expect(squid.routeCalls()).toBe(1)
+    expect(routeSendCounts).toEqual([1])
+  })
+
+  it("waits for confirmed nonce and allowance reads before requesting the route", async () => {
+    const mocked = clients({
+      confirmedNonceLagReads: 2,
+      allowanceLagReads: 1,
+    })
+    const waits: number[] = []
+    const squid = provider()
+    const fetch = squid.fetch
+    let waitsAtRoute = -1
+    squid.fetch = (async (url, init) => {
+      if (String(url).includes("/route")) waitsAtRoute = waits.length
+      return fetch(url, init)
+    }) as typeof globalThis.fetch
+    const configured = dependencies(mocked, squid)
+    configured.sleep = async (milliseconds) => {
+      waits.push(milliseconds)
+    }
+
+    await executeSquidFunding(input(), configured)
+
+    expect(mocked.calls.prepared.map((request) => request.nonce)).toEqual([
+      7, 8,
+    ])
+    expect(waits).toEqual([500, 500])
+    expect(waitsAtRoute).toBe(2)
+  })
+
+  it("retries a rate-limited executable quote using bounded Retry-After", async () => {
+    const mocked = clients({ allowance: 10n })
+    const squid = provider()
+    const fetch = squid.fetch
+    let routeAttempts = 0
+    squid.fetch = (async (url, init) => {
+      if (String(url).includes("/route") && routeAttempts++ === 0)
+        return new Response("rate limited", {
+          status: 429,
+          headers: { "retry-after": "2" },
+        })
+      return fetch(url, init)
+    }) as typeof globalThis.fetch
+    const waits: number[] = []
+    const configured = dependencies(mocked, squid)
+    configured.sleep = async (milliseconds) => {
+      waits.push(milliseconds)
+    }
+
+    await executeSquidFunding(input(), configured)
+
+    expect(routeAttempts).toBe(2)
+    expect(squid.routeCalls()).toBe(1)
+    expect(waits).toEqual([2_000])
+    expect(mocked.calls.send).toBe(1)
   })
 
   it("resets an overbroad allowance before setting the exact amount", async () => {
@@ -387,8 +468,8 @@ describe("guarded Squid execution", () => {
         },
       }),
     )
-    expiringDependencies.squid.now = () =>
-      expiring.calls.send === 0 ? 0 : 2_000
+    let nowReads = 0
+    expiringDependencies.squid.now = () => (nowReads++ < 2 ? 0 : 2_000)
     await expect(
       executeSquidFunding(input(), expiringDependencies),
     ).rejects.toThrow("trust checks")
