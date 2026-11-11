@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.4](https://github.com/FilOzone/squid-evm-funding/compare/v0.3.3...v0.3.4) (2026-11-11)
+
+
+### Chores
+
+* add ci helper ([6dcf537](https://github.com/FilOzone/squid-evm-funding/commit/6dcf5376e9dabff1b726cc8e0cf77ff7c7027ec4))
+* add ci helper ([eb38985](https://github.com/FilOzone/squid-evm-funding/commit/eb38985bdf2b7d94b0b2b3e9114594f21113d4f0))
+
 ## [0.3.3](https://github.com/FilOzone/squid-evm-funding/compare/v0.3.2...v0.3.3) (2026-08-25)
 
 
