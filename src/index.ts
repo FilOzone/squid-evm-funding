@@ -1,5 +1,9 @@
 export { resolveSourceToken } from "./catalog.js"
-export { executeSquidFunding, maximumNativeRouteFee } from "./execution.js"
+export {
+  executeSquidFunding,
+  maximumNativeRouteFee,
+  SquidExecutionError,
+} from "./execution.js"
 export { planSquidFunding } from "./planner.js"
 export {
   assertTrustedSquidQuote,

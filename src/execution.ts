@@ -32,6 +32,34 @@ const PREFLIGHT_MAX_ATTEMPTS = 3
 const PREFLIGHT_RETRY_DELAY_MS = 500
 const MAX_RETRY_AFTER_MS = 5_000
 
+export class SquidExecutionError extends Error {
+  readonly requirementId: string
+  readonly transactionHash?: Hash
+  readonly completedRoutes: SquidExecutionResult["routes"]
+  readonly nativeFee: bigint
+
+  constructor(
+    cause: unknown,
+    context: {
+      requirementId: string
+      transactionHash?: Hash
+      completedRoutes: SquidExecutionResult["routes"]
+      nativeFee: bigint
+    },
+  ) {
+    super(
+      `Execution failed after funds were committed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    )
+    this.name = "SquidExecutionError"
+    this.requirementId = context.requirementId
+    if (context.transactionHash != null)
+      this.transactionHash = context.transactionHash
+    this.completedRoutes = context.completedRoutes
+    this.nativeFee = context.nativeFee
+  }
+}
+
 export function maximumNativeRouteFee(reviewedFee: bigint) {
   if (reviewedFee < 0n)
     throw new Error("Reviewed native route fee must be non-negative")
@@ -329,6 +357,8 @@ export async function executeSquidFunding(
   const now = () => Math.floor((dependencies.squid.now ?? Date.now)() / 1000)
   let totalNativeFee = 0n
   let totalNativeRouteFee = 0n
+  let committed = false
+  let activeTransactionHash: Hash | undefined
   let minimumNonce: number | undefined
   let confirmedBlockNumber: bigint | undefined
   const routes: Array<{ requirementId: string; transactionHash: Hash }> = []
@@ -448,12 +478,16 @@ export async function executeSquidFunding(
     if ((await dependencies.walletClient.getChainId()) !== plan.source.chainId)
       throw new Error("Wallet chain does not match the Squid source chain")
     validate?.()
-    totalNativeFee += prepared.fee
     const transactionHash = (await dependencies.walletClient.sendTransaction({
       ...prepared.request,
       account: dependencies.walletClient.account,
       chain: undefined,
     } as never)) as Hash
+    // The broadcast is the commitment point: record the hash and fee here
+    // so a revert or receipt failure still reports what went on-chain.
+    committed = true
+    activeTransactionHash = transactionHash
+    totalNativeFee += prepared.fee
     const receipt = await dependencies.publicClient.waitForTransactionReceipt({
       hash: transactionHash,
     })
@@ -463,8 +497,7 @@ export async function executeSquidFunding(
     return transactionHash
   }
 
-  for (let index = 0; index < plan.quotes.length; index += 1) {
-    const planned = plan.quotes[index] as SquidPriceQuote
+  const executeQuote = async (planned: SquidPriceQuote, index: number) => {
     const remainingSource = plan.quotes
       .slice(index)
       .reduce((total, quote) => total + quote.sourceAmount, 0n)
@@ -597,7 +630,27 @@ export async function executeSquidFunding(
     }
     if (!complete)
       throw new Error("Squid route did not complete within the poll limit")
-    routes.push({ requirementId: planned.requirement.id, transactionHash })
+    return transactionHash
+  }
+
+  for (let index = 0; index < plan.quotes.length; index += 1) {
+    const planned = plan.quotes[index] as SquidPriceQuote
+    activeTransactionHash = undefined
+    try {
+      const transactionHash = await executeQuote(planned, index)
+      routes.push({ requirementId: planned.requirement.id, transactionHash })
+    } catch (error) {
+      // Before the first broadcast nothing is committed on-chain, so plain
+      // errors stay plain; after it the host needs the committed state to
+      // recover.
+      if (!committed) throw error
+      throw new SquidExecutionError(error, {
+        requirementId: planned.requirement.id,
+        transactionHash: activeTransactionHash,
+        completedRoutes: [...routes],
+        nativeFee: totalNativeFee,
+      })
+    }
   }
   return { sourceAmount, nativeFee: totalNativeFee, routes }
 }
